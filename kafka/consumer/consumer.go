@@ -1,4 +1,4 @@
-package kafka
+package consumer
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/zuksmaq/messaging"
+	"github.com/zuksmaq/messaging/kafka"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -20,7 +21,7 @@ var _ messaging.Consumer[string, []byte] = (*Consumer[string, []byte])(nil)
 const pollInterval = 250 * time.Millisecond
 
 // Consumer reads messages from Kafka, deserializing keys and values in
-// the formats named by its ConsumerConfig. It implements
+// the formats named by its Config. It implements
 // messaging.Consumer[K, V].
 //
 // Auto-commit is off by construction: a consumed message is re-delivered
@@ -28,41 +29,38 @@ const pollInterval = 250 * time.Millisecond
 // at-least-once and handlers' idempotency the caller's responsibility.
 type Consumer[K, V any] struct {
 	client *ckafka.Consumer
-	cfg    ConsumerConfig
+	cfg    Config
 	logger *slog.Logger
 
-	keyDe   Deserializer[K]
-	valueDe Deserializer[V]
+	keyDe   kafka.Deserializer[K]
+	valueDe kafka.Deserializer[V]
 
 	consumed metric.Int64Counter
 	failed   metric.Int64Counter
 }
 
-// NewConsumer builds a Consumer from cfg and subscribes it to the
+// New builds a Consumer from cfg and subscribes it to the
 // configured topics. It returns an error wrapping
 // messaging.ErrInvalidConfig if cfg is invalid or if K or V cannot be
 // decoded from the configured format.
-//
-// It is NewConsumer rather than New (ADR 0003) only because New already
-// names the producer constructor in this package.
-func NewConsumer[K, V any](cfg ConsumerConfig, opts ...Option) (*Consumer[K, V], error) {
+func New[K, V any](cfg Config, opts ...kafka.Option) (*Consumer[K, V], error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	cfg = cfg.withDefaults()
 
-	keyDe, err := deserializerFor[K](cfg.KeyFormat)
+	keyDe, err := kafka.DeserializerFor[K](cfg.KeyFormat)
 	if err != nil {
 		return nil, fmt.Errorf("key format: %w", err)
 	}
-	valueDe, err := deserializerFor[V](cfg.ValueFormat)
+	valueDe, err := kafka.DeserializerFor[V](cfg.ValueFormat)
 	if err != nil {
 		return nil, fmt.Errorf("value format: %w", err)
 	}
 
-	o := resolveOptions(opts)
+	o := kafka.ResolveOptions(opts)
 
-	client, err := ckafka.NewConsumer(consumerClientConfig(cfg))
+	client, err := ckafka.NewConsumer(clientConfig(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("%w: creating consumer: %v", messaging.ErrBroker, err)
 	}
@@ -70,11 +68,11 @@ func NewConsumer[K, V any](cfg ConsumerConfig, opts ...Option) (*Consumer[K, V],
 	c := &Consumer[K, V]{
 		client:  client,
 		cfg:     cfg,
-		logger:  o.logger,
+		logger:  o.Logger,
 		keyDe:   keyDe,
 		valueDe: valueDe,
 	}
-	if err := c.initMetrics(o.meter); err != nil {
+	if err := c.initMetrics(o.Meter); err != nil {
 		_ = client.Close()
 		return nil, err
 	}
@@ -83,19 +81,6 @@ func NewConsumer[K, V any](cfg ConsumerConfig, opts ...Option) (*Consumer[K, V],
 		return nil, fmt.Errorf("%w: subscribing to %v: %v", messaging.ErrBroker, cfg.Topics, err)
 	}
 	return c, nil
-}
-
-// consumerClientConfig maps a ConsumerConfig onto librdkafka settings.
-// Auto-commit is hard-wired off — there is no config knob for it.
-func consumerClientConfig(cfg ConsumerConfig) *ckafka.ConfigMap {
-	cm := &ckafka.ConfigMap{
-		"bootstrap.servers":  cfg.BootstrapServers,
-		"group.id":           cfg.GroupID,
-		"enable.auto.commit": false,
-		"auto.offset.reset":  string(cfg.OffsetReset),
-	}
-	applySecurity(cm, cfg.Security)
-	return cm
 }
 
 func (c *Consumer[K, V]) initMetrics(m metric.Meter) error {

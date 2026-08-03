@@ -12,6 +12,10 @@ patterns, structured as multiple Go modules in one repository.
 | outbox | `github.com/zuksmaq/messaging/outbox` | root |
 | inbox | `github.com/zuksmaq/messaging/inbox` | root |
 
+The kafka module is split into packages: `kafka` holds the wire formats
+and connection settings both sides share, `kafka/producer` and
+`kafka/consumer` each own a `Config` and a `New` constructor (ADR 0008).
+
 See `messaging-handoff.md` for the full design record: decisions,
 invariants, open items, and rejected alternatives.
 

@@ -1,4 +1,4 @@
-package kafka
+package producer
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/zuksmaq/messaging"
+	"github.com/zuksmaq/messaging/kafka"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
@@ -31,12 +32,12 @@ func TestCloseReportsUnflushedMessages(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	reader, meter := testMeter()
 
-	p, err := New[string, []byte](ProducerConfig{
+	p, err := New[string, []byte](Config{
 		BootstrapServers: "127.0.0.1:1",
-		KeyFormat:        FormatString,
-		ValueFormat:      FormatBytes,
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatBytes,
 		FlushTimeout:     50 * time.Millisecond,
-	}, WithLogger(logger), WithMetrics(meter))
+	}, kafka.WithLogger(logger), kafka.WithMetrics(meter))
 	if err != nil {
 		t.Fatalf("New = %v", err)
 	}

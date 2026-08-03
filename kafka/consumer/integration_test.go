@@ -1,6 +1,6 @@
 //go:build integration
 
-package kafka
+package consumer
 
 import (
 	"context"
@@ -9,6 +9,9 @@ import (
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/zuksmaq/messaging"
+	"github.com/zuksmaq/messaging/kafka"
+	"github.com/zuksmaq/messaging/kafka/internal/kafkatest"
+	"github.com/zuksmaq/messaging/kafka/producer"
 )
 
 // TestConsumeRoundTripPerFormat publishes with the ticket-02 producer and
@@ -16,16 +19,16 @@ import (
 // asserting the value survives the round trip and Commit stores the next
 // offset to read.
 func TestConsumeRoundTripPerFormat(t *testing.T) {
-	bootstrap := brokers(t)
+	bootstrap := kafkatest.Brokers(t)
 
 	t.Run("bytes key and value", func(t *testing.T) {
 		topic := "consume-bytes"
-		createTopic(t, bootstrap, topic)
+		kafkatest.CreateTopic(t, bootstrap, topic)
 
-		p := newProducer[[]byte, []byte](t, bootstrap, FormatBytes, FormatBytes)
+		p := newProducer[[]byte, []byte](t, bootstrap, kafka.FormatBytes, kafka.FormatBytes)
 		produced := mustProduce(t, p, topic, []byte("k1"), []byte("v1"))
 
-		c := newConsumer[[]byte, []byte](t, bootstrap, topic, FormatBytes, FormatBytes)
+		c := newConsumer[[]byte, []byte](t, bootstrap, topic, kafka.FormatBytes, kafka.FormatBytes)
 		got := mustConsume(t, c)
 
 		if string(got.Key) != "k1" || string(got.Value) != "v1" {
@@ -37,12 +40,12 @@ func TestConsumeRoundTripPerFormat(t *testing.T) {
 
 	t.Run("string key and value", func(t *testing.T) {
 		topic := "consume-string"
-		createTopic(t, bootstrap, topic)
+		kafkatest.CreateTopic(t, bootstrap, topic)
 
-		p := newProducer[string, string](t, bootstrap, FormatString, FormatString)
+		p := newProducer[string, string](t, bootstrap, kafka.FormatString, kafka.FormatString)
 		produced := mustProduce(t, p, topic, "k2", "v2")
 
-		c := newConsumer[string, string](t, bootstrap, topic, FormatString, FormatString)
+		c := newConsumer[string, string](t, bootstrap, topic, kafka.FormatString, kafka.FormatString)
 		got := mustConsume(t, c)
 
 		if got.Key != "k2" || got.Value != "v2" {
@@ -60,13 +63,13 @@ func TestConsumeRoundTripPerFormat(t *testing.T) {
 			Cents int64  `json:"cents"`
 		}
 		topic := "consume-json"
-		createTopic(t, bootstrap, topic)
+		kafkatest.CreateTopic(t, bootstrap, topic)
 
 		want := order{ID: "o-1", Cents: 1999}
-		p := newProducer[string, order](t, bootstrap, FormatString, FormatJSON)
+		p := newProducer[string, order](t, bootstrap, kafka.FormatString, kafka.FormatJSON)
 		produced := mustProduce(t, p, topic, "k3", want)
 
-		c := newConsumer[string, order](t, bootstrap, topic, FormatString, FormatJSON)
+		c := newConsumer[string, order](t, bootstrap, topic, kafka.FormatString, kafka.FormatJSON)
 		got := mustConsume(t, c)
 
 		if got.Key != "k3" {
@@ -81,9 +84,9 @@ func TestConsumeRoundTripPerFormat(t *testing.T) {
 
 	t.Run("headers survive the round trip", func(t *testing.T) {
 		topic := "consume-headers"
-		createTopic(t, bootstrap, topic)
+		kafkatest.CreateTopic(t, bootstrap, topic)
 
-		p := newProducer[string, []byte](t, bootstrap, FormatString, FormatBytes)
+		p := newProducer[string, []byte](t, bootstrap, kafka.FormatString, kafka.FormatBytes)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if _, err := p.Produce(ctx, topic, "k4", []byte("v4"),
@@ -91,7 +94,7 @@ func TestConsumeRoundTripPerFormat(t *testing.T) {
 			t.Fatalf("Produce = %v", err)
 		}
 
-		c := newConsumer[string, []byte](t, bootstrap, topic, FormatString, FormatBytes)
+		c := newConsumer[string, []byte](t, bootstrap, topic, kafka.FormatString, kafka.FormatBytes)
 		got := mustConsume(t, c)
 
 		if got.EventID() != "evt-42" {
@@ -103,14 +106,14 @@ func TestConsumeRoundTripPerFormat(t *testing.T) {
 // TestConsumeTombstone asserts a nil value round-trips as a tombstone
 // rather than a deserialization error.
 func TestConsumeTombstone(t *testing.T) {
-	bootstrap := brokers(t)
+	bootstrap := kafkatest.Brokers(t)
 	topic := "consume-tombstone"
-	createTopic(t, bootstrap, topic)
+	kafkatest.CreateTopic(t, bootstrap, topic)
 
-	p := newProducer[string, []byte](t, bootstrap, FormatString, FormatBytes)
+	p := newProducer[string, []byte](t, bootstrap, kafka.FormatString, kafka.FormatBytes)
 	mustProduce[string, []byte](t, p, topic, "gone", nil)
 
-	c := newConsumer[string, []byte](t, bootstrap, topic, FormatString, FormatBytes)
+	c := newConsumer[string, []byte](t, bootstrap, topic, kafka.FormatString, kafka.FormatBytes)
 	got := mustConsume(t, c)
 
 	if got.Key != "gone" {
@@ -124,12 +127,12 @@ func TestConsumeTombstone(t *testing.T) {
 // TestConsumerReadyCheck asserts readiness succeeds against a live
 // cluster and fails against an unreachable one.
 func TestConsumerReadyCheck(t *testing.T) {
-	bootstrap := brokers(t)
+	bootstrap := kafkatest.Brokers(t)
 	topic := "consume-ready"
-	createTopic(t, bootstrap, topic)
+	kafkatest.CreateTopic(t, bootstrap, topic)
 
 	t.Run("reachable", func(t *testing.T) {
-		c := newConsumer[string, []byte](t, bootstrap, topic, FormatString, FormatBytes)
+		c := newConsumer[string, []byte](t, bootstrap, topic, kafka.FormatString, kafka.FormatBytes)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := c.ReadyCheck(ctx); err != nil {
@@ -138,7 +141,7 @@ func TestConsumerReadyCheck(t *testing.T) {
 	})
 
 	t.Run("unreachable", func(t *testing.T) {
-		c := newConsumer[string, []byte](t, "127.0.0.1:1", topic, FormatString, FormatBytes)
+		c := newConsumer[string, []byte](t, "127.0.0.1:1", topic, kafka.FormatString, kafka.FormatBytes)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		if err := c.ReadyCheck(ctx); err == nil {
@@ -150,11 +153,11 @@ func TestConsumerReadyCheck(t *testing.T) {
 // TestConsumeHonorsContextCancellation asserts Consume returns instead of
 // blocking forever once its context is done.
 func TestConsumeHonorsContextCancellation(t *testing.T) {
-	bootstrap := brokers(t)
+	bootstrap := kafkatest.Brokers(t)
 	topic := "consume-cancel"
-	createTopic(t, bootstrap, topic)
+	kafkatest.CreateTopic(t, bootstrap, topic)
 
-	c := newConsumer[string, []byte](t, bootstrap, topic, FormatString, FormatBytes)
+	c := newConsumer[string, []byte](t, bootstrap, topic, kafka.FormatString, kafka.FormatBytes)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -163,10 +166,10 @@ func TestConsumeHonorsContextCancellation(t *testing.T) {
 	}
 }
 
-func newConsumer[K, V any](t *testing.T, bootstrap, topic string, keyFmt, valFmt Format) *Consumer[K, V] {
+func newConsumer[K, V any](t *testing.T, bootstrap, topic string, keyFmt, valFmt kafka.Format) *Consumer[K, V] {
 	t.Helper()
 
-	c, err := NewConsumer[K, V](ConsumerConfig{
+	c, err := New[K, V](Config{
 		BootstrapServers: bootstrap,
 		GroupID:          "itest-" + topic,
 		Topics:           []string{topic},
@@ -174,7 +177,7 @@ func newConsumer[K, V any](t *testing.T, bootstrap, topic string, keyFmt, valFmt
 		ValueFormat:      valFmt,
 	})
 	if err != nil {
-		t.Fatalf("NewConsumer = %v", err)
+		t.Fatalf("New = %v", err)
 	}
 	t.Cleanup(func() {
 		if err := c.Close(); err != nil {
@@ -236,4 +239,40 @@ func commitAndAssertOffset[K, V any](t *testing.T, c *Consumer[K, V], msg messag
 	if want := ckafka.Offset(msg.Offset + 1); committed[0].Offset != want {
 		t.Errorf("committed offset = %v, want %v", committed[0].Offset, want)
 	}
+}
+
+// newProducer builds a ticket-02 producer used only to seed messages the
+// consumer then reads back.
+func newProducer[K, V any](t *testing.T, bootstrap string, keyFmt, valFmt kafka.Format) *producer.Producer[K, V] {
+	t.Helper()
+
+	p, err := producer.New[K, V](producer.Config{
+		BootstrapServers: bootstrap,
+		KeyFormat:        keyFmt,
+		ValueFormat:      valFmt,
+		FlushTimeout:     30 * time.Second,
+		ProduceTimeout:   60 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("producer.New = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := p.Close(context.Background()); err != nil {
+			t.Logf("closing producer: %v", err)
+		}
+	})
+	return p
+}
+
+func mustProduce[K, V any](t *testing.T, p *producer.Producer[K, V], topic string, key K, value V) messaging.ProducedMessage {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	out, err := p.Produce(ctx, topic, key, value, nil)
+	if err != nil {
+		t.Fatalf("Produce = %v", err)
+	}
+	return out
 }

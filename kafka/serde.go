@@ -29,13 +29,13 @@ type Deserializer[T any] interface {
 	Deserialize(topic string, b []byte) (T, error)
 }
 
-// serializerFor resolves format to a Serializer[T], reporting
+// SerializerFor resolves format to a Serializer[T], reporting
 // ErrInvalidConfig if T cannot be encoded in that format.
 //
-// Format lives in ProducerConfig rather than being passed as a typed
-// Serializer, so the pairing is checked here at construction time
-// instead of by the compiler.
-func serializerFor[T any](format Format) (Serializer[T], error) {
+// Format lives on the producer's and consumer's Config rather than
+// being passed as a typed Serializer, so the pairing is checked here at
+// construction time instead of by the compiler.
+func SerializerFor[T any](format Format) (Serializer[T], error) {
 	var zero T
 	switch format {
 	case FormatBytes:
@@ -55,11 +55,11 @@ func serializerFor[T any](format Format) (Serializer[T], error) {
 	}
 }
 
-// deserializerFor resolves format to a Deserializer[T], reporting
+// DeserializerFor resolves format to a Deserializer[T], reporting
 // ErrInvalidConfig if T cannot be decoded from that format. It mirrors
-// serializerFor so a consumer rejects a bad type/format pairing at
+// SerializerFor so a consumer rejects a bad type/format pairing at
 // construction time.
-func deserializerFor[T any](format Format) (Deserializer[T], error) {
+func DeserializerFor[T any](format Format) (Deserializer[T], error) {
 	var zero T
 	switch format {
 	case FormatBytes:
