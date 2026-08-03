@@ -95,6 +95,94 @@ func TestSerializers(t *testing.T) {
 	})
 }
 
+func TestDeserializerForRejectsMismatchedType(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bytes with string", func(t *testing.T) {
+		t.Parallel()
+		if _, err := deserializerFor[string](FormatBytes); !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Errorf("deserializerFor[string](bytes) error = %v, want ErrInvalidConfig", err)
+		}
+	})
+
+	t.Run("string with int", func(t *testing.T) {
+		t.Parallel()
+		if _, err := deserializerFor[int](FormatString); !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Errorf("deserializerFor[int](string) error = %v, want ErrInvalidConfig", err)
+		}
+	})
+
+	t.Run("unknown format", func(t *testing.T) {
+		t.Parallel()
+		if _, err := deserializerFor[string]("yaml"); !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Errorf("deserializerFor[string](yaml) error = %v, want ErrInvalidConfig", err)
+		}
+	})
+}
+
+func TestDeserializers(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bytes passes through", func(t *testing.T) {
+		t.Parallel()
+		d, err := deserializerFor[[]byte](FormatBytes)
+		if err != nil {
+			t.Fatalf("deserializerFor = %v", err)
+		}
+		got, err := d.Deserialize("t", []byte("hello"))
+		if err != nil {
+			t.Fatalf("Deserialize = %v", err)
+		}
+		if string(got) != "hello" {
+			t.Errorf("Deserialize = %q, want %q", got, "hello")
+		}
+	})
+
+	t.Run("string decodes utf8", func(t *testing.T) {
+		t.Parallel()
+		d, err := deserializerFor[string](FormatString)
+		if err != nil {
+			t.Fatalf("deserializerFor = %v", err)
+		}
+		got, err := d.Deserialize("t", []byte("héllo"))
+		if err != nil {
+			t.Fatalf("Deserialize = %v", err)
+		}
+		if got != "héllo" {
+			t.Errorf("Deserialize = %q, want %q", got, "héllo")
+		}
+	})
+
+	t.Run("json unmarshals struct", func(t *testing.T) {
+		t.Parallel()
+		type payload struct {
+			ID int `json:"id"`
+		}
+		d, err := deserializerFor[payload](FormatJSON)
+		if err != nil {
+			t.Fatalf("deserializerFor = %v", err)
+		}
+		got, err := d.Deserialize("t", []byte(`{"id":7}`))
+		if err != nil {
+			t.Fatalf("Deserialize = %v", err)
+		}
+		if got.ID != 7 {
+			t.Errorf("Deserialize = %+v, want ID 7", got)
+		}
+	})
+
+	t.Run("json reports malformed input", func(t *testing.T) {
+		t.Parallel()
+		d, err := deserializerFor[struct{}](FormatJSON)
+		if err != nil {
+			t.Fatalf("deserializerFor = %v", err)
+		}
+		if _, err := d.Deserialize("t", []byte("not json")); !errors.Is(err, messaging.ErrDeserialization) {
+			t.Errorf("Deserialize error = %v, want ErrDeserialization", err)
+		}
+	})
+}
+
 func TestNewRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
@@ -115,6 +203,32 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 		})
 		if !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("New error = %v, want ErrInvalidConfig", err)
+		}
+	})
+}
+
+func TestNewConsumerRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid config", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewConsumer[string, []byte](ConsumerConfig{})
+		if !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Errorf("NewConsumer error = %v, want ErrInvalidConfig", err)
+		}
+	})
+
+	t.Run("format type mismatch", func(t *testing.T) {
+		t.Parallel()
+		_, err := NewConsumer[int, []byte](ConsumerConfig{
+			BootstrapServers: "localhost:9092",
+			GroupID:          "orders",
+			Topics:           []string{"orders.v1"},
+			KeyFormat:        FormatString,
+			ValueFormat:      FormatBytes,
+		})
+		if !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Errorf("NewConsumer error = %v, want ErrInvalidConfig", err)
 		}
 	})
 }

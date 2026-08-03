@@ -114,17 +114,24 @@ func clientConfig(cfg ProducerConfig) *ckafka.ConfigMap {
 	cm := &ckafka.ConfigMap{
 		"bootstrap.servers":  cfg.BootstrapServers,
 		"enable.idempotence": true,
-		"security.protocol":  string(cfg.Security.Protocol),
 	}
-	if cfg.Security.sasl() {
-		_ = cm.SetKey("sasl.mechanism", cfg.Security.Mechanism)
-		_ = cm.SetKey("sasl.username", cfg.Security.Username)
-		_ = cm.SetKey("sasl.password", cfg.Security.Password)
-	}
-	if cfg.Security.CALocation != "" {
-		_ = cm.SetKey("ssl.ca.location", cfg.Security.CALocation)
-	}
+	applySecurity(cm, cfg.Security)
 	return cm
+}
+
+// applySecurity writes the transport and authentication settings onto
+// cm. Errors from SetKey are ignored: the keys are literals and the
+// values are validated by Security.Validate.
+func applySecurity(cm *ckafka.ConfigMap, s Security) {
+	_ = cm.SetKey("security.protocol", string(s.Protocol))
+	if s.sasl() {
+		_ = cm.SetKey("sasl.mechanism", s.Mechanism)
+		_ = cm.SetKey("sasl.username", s.Username)
+		_ = cm.SetKey("sasl.password", s.Password)
+	}
+	if s.CALocation != "" {
+		_ = cm.SetKey("ssl.ca.location", s.CALocation)
+	}
 }
 
 func (p *Producer[K, V]) initMetrics(m metric.Meter) error {
