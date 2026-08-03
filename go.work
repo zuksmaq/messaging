@@ -5,4 +5,5 @@ use (
 	./kafka
 	./outbox
 	./inbox
+	./integration
 )

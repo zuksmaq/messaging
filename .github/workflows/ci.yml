@@ -15,7 +15,7 @@ jobs:
 
       - name: build and test (workspace off, per-module)
         run: |
-          for m in . kafka outbox inbox; do
+          for m in . kafka outbox inbox integration; do
             (cd "$m" && GOWORK=off go build ./... && GOWORK=off go test ./...)
           done
 
@@ -36,6 +36,6 @@ jobs:
       # so they run in their own job rather than slowing every push.
       - name: integration tests
         run: |
-          for m in kafka outbox inbox; do
+          for m in kafka outbox inbox integration; do
             (cd "$m" && go test -tags integration -timeout 20m ./...)
           done
