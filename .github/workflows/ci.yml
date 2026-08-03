@@ -23,3 +23,19 @@ jobs:
         run: |
           go build ./...
           go test ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      # Tagged tests stand up real brokers/databases via testcontainers,
+      # so they run in their own job rather than slowing every push.
+      - name: integration tests
+        run: |
+          for m in kafka outbox inbox; do
+            (cd "$m" && go test -tags integration -timeout 20m ./...)
+          done
