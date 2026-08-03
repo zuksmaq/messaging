@@ -31,6 +31,10 @@ type Config struct {
 	// empty.
 	Security kafka.Security
 
+	// SchemaRegistry is required when KeyFormat or ValueFormat needs one
+	// (kafka.FormatAvro) and ignored otherwise.
+	SchemaRegistry kafka.SchemaRegistryConfig
+
 	// FlushTimeout bounds how long Close waits for un-acknowledged
 	// messages. Defaults to DefaultFlushTimeout.
 	FlushTimeout time.Duration
@@ -59,6 +63,9 @@ func (c Config) Validate() error {
 	}
 	if c.ProduceTimeout < 0 {
 		return fmt.Errorf("%w: produce timeout must not be negative", messaging.ErrInvalidConfig)
+	}
+	if err := kafka.ValidateSchemaRegistry(c.SchemaRegistry, c.KeyFormat, c.ValueFormat); err != nil {
+		return err
 	}
 	return c.Security.Validate()
 }

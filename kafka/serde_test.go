@@ -12,21 +12,21 @@ func TestSerializerForRejectsMismatchedType(t *testing.T) {
 
 	t.Run("bytes with string", func(t *testing.T) {
 		t.Parallel()
-		if _, err := SerializerFor[string](FormatBytes); !errors.Is(err, messaging.ErrInvalidConfig) {
+		if _, err := SerializerFor[string](FormatBytes, ValuePart, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("SerializerFor[string](bytes) error = %v, want ErrInvalidConfig", err)
 		}
 	})
 
 	t.Run("string with int", func(t *testing.T) {
 		t.Parallel()
-		if _, err := SerializerFor[int](FormatString); !errors.Is(err, messaging.ErrInvalidConfig) {
+		if _, err := SerializerFor[int](FormatString, ValuePart, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("SerializerFor[int](string) error = %v, want ErrInvalidConfig", err)
 		}
 	})
 
 	t.Run("unknown format", func(t *testing.T) {
 		t.Parallel()
-		if _, err := SerializerFor[string]("yaml"); !errors.Is(err, messaging.ErrInvalidConfig) {
+		if _, err := SerializerFor[string]("yaml", ValuePart, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("SerializerFor[string](yaml) error = %v, want ErrInvalidConfig", err)
 		}
 	})
@@ -37,7 +37,7 @@ func TestSerializers(t *testing.T) {
 
 	t.Run("bytes passes through", func(t *testing.T) {
 		t.Parallel()
-		s, err := SerializerFor[[]byte](FormatBytes)
+		s, err := SerializerFor[[]byte](FormatBytes, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("SerializerFor = %v", err)
 		}
@@ -52,7 +52,7 @@ func TestSerializers(t *testing.T) {
 
 	t.Run("string encodes utf8", func(t *testing.T) {
 		t.Parallel()
-		s, err := SerializerFor[string](FormatString)
+		s, err := SerializerFor[string](FormatString, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("SerializerFor = %v", err)
 		}
@@ -70,7 +70,7 @@ func TestSerializers(t *testing.T) {
 		type payload struct {
 			ID int `json:"id"`
 		}
-		s, err := SerializerFor[payload](FormatJSON)
+		s, err := SerializerFor[payload](FormatJSON, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("SerializerFor = %v", err)
 		}
@@ -85,7 +85,7 @@ func TestSerializers(t *testing.T) {
 
 	t.Run("json reports unmarshalable value", func(t *testing.T) {
 		t.Parallel()
-		s, err := SerializerFor[chan int](FormatJSON)
+		s, err := SerializerFor[chan int](FormatJSON, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("SerializerFor = %v", err)
 		}
@@ -100,21 +100,21 @@ func TestDeserializerForRejectsMismatchedType(t *testing.T) {
 
 	t.Run("bytes with string", func(t *testing.T) {
 		t.Parallel()
-		if _, err := DeserializerFor[string](FormatBytes); !errors.Is(err, messaging.ErrInvalidConfig) {
+		if _, err := DeserializerFor[string](FormatBytes, ValuePart, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("DeserializerFor[string](bytes) error = %v, want ErrInvalidConfig", err)
 		}
 	})
 
 	t.Run("string with int", func(t *testing.T) {
 		t.Parallel()
-		if _, err := DeserializerFor[int](FormatString); !errors.Is(err, messaging.ErrInvalidConfig) {
+		if _, err := DeserializerFor[int](FormatString, ValuePart, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("DeserializerFor[int](string) error = %v, want ErrInvalidConfig", err)
 		}
 	})
 
 	t.Run("unknown format", func(t *testing.T) {
 		t.Parallel()
-		if _, err := DeserializerFor[string]("yaml"); !errors.Is(err, messaging.ErrInvalidConfig) {
+		if _, err := DeserializerFor[string]("yaml", ValuePart, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
 			t.Errorf("DeserializerFor[string](yaml) error = %v, want ErrInvalidConfig", err)
 		}
 	})
@@ -125,7 +125,7 @@ func TestDeserializers(t *testing.T) {
 
 	t.Run("bytes passes through", func(t *testing.T) {
 		t.Parallel()
-		d, err := DeserializerFor[[]byte](FormatBytes)
+		d, err := DeserializerFor[[]byte](FormatBytes, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("DeserializerFor = %v", err)
 		}
@@ -140,7 +140,7 @@ func TestDeserializers(t *testing.T) {
 
 	t.Run("string decodes utf8", func(t *testing.T) {
 		t.Parallel()
-		d, err := DeserializerFor[string](FormatString)
+		d, err := DeserializerFor[string](FormatString, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("DeserializerFor = %v", err)
 		}
@@ -158,7 +158,7 @@ func TestDeserializers(t *testing.T) {
 		type payload struct {
 			ID int `json:"id"`
 		}
-		d, err := DeserializerFor[payload](FormatJSON)
+		d, err := DeserializerFor[payload](FormatJSON, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("DeserializerFor = %v", err)
 		}
@@ -173,7 +173,7 @@ func TestDeserializers(t *testing.T) {
 
 	t.Run("json reports malformed input", func(t *testing.T) {
 		t.Parallel()
-		d, err := DeserializerFor[struct{}](FormatJSON)
+		d, err := DeserializerFor[struct{}](FormatJSON, ValuePart, nil)
 		if err != nil {
 			t.Fatalf("DeserializerFor = %v", err)
 		}

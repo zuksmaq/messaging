@@ -35,6 +35,9 @@ type Consumer[K, V any] struct {
 	keyDe   kafka.Deserializer[K]
 	valueDe kafka.Deserializer[V]
 
+	// registry is nil unless a configured format needs one.
+	registry *kafka.SchemaRegistry
+
 	consumed metric.Int64Counter
 	failed   metric.Int64Counter
 }
@@ -49,12 +52,19 @@ func New[K, V any](cfg Config, opts ...kafka.Option) (*Consumer[K, V], error) {
 	}
 	cfg = cfg.withDefaults()
 
-	keyDe, err := kafka.DeserializerFor[K](cfg.KeyFormat)
+	registry, err := kafka.NewSchemaRegistry(cfg.SchemaRegistry)
 	if err != nil {
+		return nil, err
+	}
+
+	keyDe, err := kafka.DeserializerFor[K](cfg.KeyFormat, kafka.KeyPart, registry)
+	if err != nil {
+		_ = registry.Close()
 		return nil, fmt.Errorf("key format: %w", err)
 	}
-	valueDe, err := kafka.DeserializerFor[V](cfg.ValueFormat)
+	valueDe, err := kafka.DeserializerFor[V](cfg.ValueFormat, kafka.ValuePart, registry)
 	if err != nil {
+		_ = registry.Close()
 		return nil, fmt.Errorf("value format: %w", err)
 	}
 
@@ -62,22 +72,26 @@ func New[K, V any](cfg Config, opts ...kafka.Option) (*Consumer[K, V], error) {
 
 	client, err := ckafka.NewConsumer(clientConfig(cfg))
 	if err != nil {
+		_ = registry.Close()
 		return nil, fmt.Errorf("%w: creating consumer: %v", messaging.ErrBroker, err)
 	}
 
 	c := &Consumer[K, V]{
-		client:  client,
-		cfg:     cfg,
-		logger:  o.Logger,
-		keyDe:   keyDe,
-		valueDe: valueDe,
+		client:   client,
+		cfg:      cfg,
+		logger:   o.Logger,
+		keyDe:    keyDe,
+		valueDe:  valueDe,
+		registry: registry,
 	}
 	if err := c.initMetrics(o.Meter); err != nil {
 		_ = client.Close()
+		_ = registry.Close()
 		return nil, err
 	}
 	if err := client.SubscribeTopics(cfg.Topics, nil); err != nil {
 		_ = client.Close()
+		_ = registry.Close()
 		return nil, fmt.Errorf("%w: subscribing to %v: %v", messaging.ErrBroker, cfg.Topics, err)
 	}
 	return c, nil
@@ -201,10 +215,14 @@ func (c *Consumer[K, V]) ReadyCheck(ctx context.Context) error {
 // messages are re-delivered to the group; Close never commits on the
 // caller's behalf.
 func (c *Consumer[K, V]) Close() error {
-	if err := c.client.Close(); err != nil {
+	err := c.client.Close()
+	// A registry failure is reported only when the client closed cleanly:
+	// losing the group membership is the more urgent news.
+	registryErr := c.registry.Close()
+	if err != nil {
 		return fmt.Errorf("%w: closing consumer: %v", messaging.ErrBroker, err)
 	}
-	return nil
+	return registryErr
 }
 
 func fromHeaders(h []ckafka.Header) map[string][]byte {

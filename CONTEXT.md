@@ -38,6 +38,12 @@ database-agnostic.
 - **DeliveryStatus** — how durably a produced message was persisted:
   `NotPersisted` / `PossiblyPersisted` / `Persisted`. The outbox relay
   requires `Persisted` before deleting a row.
+- **SchemaRegistry** — the Confluent Schema Registry client the `Avro`
+  wire format needs (`SchemaRegistryConfig` on the producer's and
+  consumer's `Config`). Schemas register under the topic-name strategy
+  subjects `<topic>-key` and `<topic>-value`, so a topic's key and value
+  carry independent schemas. Configuring `Avro` without a registry is a
+  construction-time error, never a first-publish surprise.
 - **EventId** — the producer-assigned idempotency id (an `event-id`
   header). The outbox relay stamps it from the outbox row id;
   consumers use it as the inbox de-duplication key.

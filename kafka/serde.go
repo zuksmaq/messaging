@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry/serde"
 	"github.com/zuksmaq/messaging"
 )
 
@@ -17,7 +18,33 @@ const (
 	FormatString Format = "string"
 	// FormatJSON encodes any type with encoding/json.
 	FormatJSON Format = "json"
+	// FormatAvro encodes a struct as Confluent-framed Avro, registering
+	// its schema in a Schema Registry.
+	FormatAvro Format = "avro"
 )
+
+// NeedsSchemaRegistry reports whether this format can only be encoded
+// with a Schema Registry behind it.
+func (f Format) NeedsSchemaRegistry() bool { return f == FormatAvro }
+
+// Part names which half of a message a codec handles. Avro derives the
+// Schema Registry subject from it ("<topic>-key" or "<topic>-value"), so
+// the two halves of a topic carry independent schemas.
+type Part int
+
+const (
+	// KeyPart is the message key.
+	KeyPart Part = iota
+	// ValuePart is the message value.
+	ValuePart
+)
+
+func (p Part) serdeType() serde.Type {
+	if p == KeyPart {
+		return serde.KeySerde
+	}
+	return serde.ValueSerde
+}
 
 // Serializer encodes a value of type T for the wire.
 type Serializer[T any] interface {
@@ -35,7 +62,11 @@ type Deserializer[T any] interface {
 // Format lives on the producer's and consumer's Config rather than
 // being passed as a typed Serializer, so the pairing is checked here at
 // construction time instead of by the compiler.
-func SerializerFor[T any](format Format) (Serializer[T], error) {
+//
+// part and sr matter only to the formats that need a Schema Registry:
+// sr may be nil for the others, and Avro reports
+// messaging.ErrSchemaRegistryRequired when it is nil.
+func SerializerFor[T any](format Format, part Part, sr *SchemaRegistry) (Serializer[T], error) {
 	var zero T
 	switch format {
 	case FormatBytes:
@@ -50,6 +81,8 @@ func SerializerFor[T any](format Format) (Serializer[T], error) {
 		return nil, fmt.Errorf("%w: format %q requires string, got %T", messaging.ErrInvalidConfig, format, zero)
 	case FormatJSON:
 		return jsonCodec[T]{}, nil
+	case FormatAvro:
+		return avroSerializerFor[T](part, sr)
 	default:
 		return nil, fmt.Errorf("%w: unknown format %q", messaging.ErrInvalidConfig, format)
 	}
@@ -59,7 +92,7 @@ func SerializerFor[T any](format Format) (Serializer[T], error) {
 // ErrInvalidConfig if T cannot be decoded from that format. It mirrors
 // SerializerFor so a consumer rejects a bad type/format pairing at
 // construction time.
-func DeserializerFor[T any](format Format) (Deserializer[T], error) {
+func DeserializerFor[T any](format Format, part Part, sr *SchemaRegistry) (Deserializer[T], error) {
 	var zero T
 	switch format {
 	case FormatBytes:
@@ -74,6 +107,8 @@ func DeserializerFor[T any](format Format) (Deserializer[T], error) {
 		return nil, fmt.Errorf("%w: format %q requires string, got %T", messaging.ErrInvalidConfig, format, zero)
 	case FormatJSON:
 		return jsonCodec[T]{}, nil
+	case FormatAvro:
+		return avroDeserializerFor[T](part, sr)
 	default:
 		return nil, fmt.Errorf("%w: unknown format %q", messaging.ErrInvalidConfig, format)
 	}
