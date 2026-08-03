@@ -12,6 +12,7 @@ package inbox_test
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
 	"time"
 
@@ -293,6 +294,87 @@ func TestConcurrentDeliveriesSettleOnOneWinner(t *testing.T) {
 		}
 		if has := hasProcessed(t, db, in, "evt-1"); !has {
 			t.Error("HasProcessed after the race = false, want true: the re-delivery must now be skipped")
+		}
+	})
+}
+
+// TestManyConcurrentDeliveriesNeverCollide races deliveries of one event
+// with no ordering imposed between their existence checks and their
+// inserts, which is the interleaving
+// TestConcurrentDeliveriesSettleOnOneWinner cannot reach: there the first
+// delivery finishes recording before the second starts, so the two never
+// check at the same instant.
+//
+// Exactly one delivery still wins and no delivery gets an error. The
+// no-error half is the point: MarkProcessed promises that recording an
+// already-recorded id reports false rather than failing, and a dialect
+// whose conditional insert is not serialized against a concurrent one
+// breaks that promise with a duplicate-key error instead — which a caller
+// has no way to tell from a real fault.
+func TestManyConcurrentDeliveriesNeverCollide(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		ctx := context.Background()
+		in := newInbox(t, b)
+
+		// Every transaction is open before any of them records, so they
+		// contend on the same unrecorded id.
+		const deliveries = 10
+		txs := make([]*sql.Tx, deliveries)
+		for i := range txs {
+			txs[i] = begin(t, db)
+		}
+
+		var (
+			wg      sync.WaitGroup
+			mu      sync.Mutex
+			winners int
+			errs    []error
+			start   = make(chan struct{})
+		)
+		for _, tx := range txs {
+			wg.Add(1)
+			go func(tx *sql.Tx) {
+				defer wg.Done()
+				<-start
+
+				recorded, err := in.MarkProcessed(ctx, tx, "evt-1")
+
+				mu.Lock()
+				switch {
+				case err != nil:
+					errs = append(errs, err)
+				case recorded:
+					winners++
+				}
+				mu.Unlock()
+
+				// Only the winner may commit; every loser rolls back and waits
+				// for the re-delivery.
+				if err != nil || !recorded {
+					_ = tx.Rollback()
+					return
+				}
+				if err := tx.Commit(); err != nil {
+					mu.Lock()
+					errs = append(errs, err)
+					mu.Unlock()
+				}
+			}(tx)
+		}
+		close(start)
+		wg.Wait()
+
+		for _, err := range errs {
+			t.Errorf("MarkProcessed under contention: %v", err)
+		}
+		if winners != 1 {
+			t.Errorf("deliveries that recorded the event = %d, want 1", winners)
+		}
+		if n := b.Count(t, db); n != 1 {
+			t.Errorf("inbox rows after %d concurrent deliveries = %d, want 1", deliveries, n)
+		}
+		if has := hasProcessed(t, db, in, "evt-1"); !has {
+			t.Error("HasProcessed after the race = false, want true")
 		}
 	})
 }
