@@ -46,7 +46,7 @@ type Backend struct {
 // Backends returns every database the inbox supports, so a test can run
 // itself against all of them.
 func Backends() []Backend {
-	return []Backend{postgresBackend()}
+	return []Backend{postgresBackend(), sqlServerBackend()}
 }
 
 // Count returns how many inbox rows exist.
