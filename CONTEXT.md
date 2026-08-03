@@ -12,6 +12,7 @@ and their rationale.
 | kafka | `github.com/zuksmaq/messaging/kafka` | root |
 | outbox | `github.com/zuksmaq/messaging/outbox` | root |
 | inbox | `github.com/zuksmaq/messaging/inbox` | root |
+| integration | `github.com/zuksmaq/messaging/integration` | all four |
 
 `outbox/postgres` and `outbox/sqlserver` (and the `inbox` equivalents)
 hold dialect-specific SQL only — the core `outbox`/`inbox` packages are
