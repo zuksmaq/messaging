@@ -1,1 +1,269 @@
 package outbox
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"time"
+
+	"github.com/zuksmaq/messaging"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+// Relay defaults.
+const (
+	defaultBatchSize    = 100
+	defaultPollInterval = time.Second
+)
+
+// RelayConfig configures the polling relay. DB, Dialect and Producer are
+// mandatory; the rest have defaults.
+type RelayConfig struct {
+	// DB is the database holding the outbox table. The relay opens its
+	// own transaction per batch, so this is a pool, not a caller's
+	// transaction.
+	DB *sql.DB
+
+	// Dialect supplies the claim and delete SQL.
+	Dialect Dialect
+
+	// Producer publishes claimed rows. Rows are staged as bytes, so the
+	// producer is typed in bytes.
+	Producer messaging.Producer[[]byte, []byte]
+
+	// BatchSize is the most rows one poll claims. Defaults to 100.
+	BatchSize int
+
+	// PollInterval is how long Run waits after a poll that did not fill
+	// a batch. Defaults to one second.
+	PollInterval time.Duration
+}
+
+// Validate reports whether the config is usable. NewRelay calls it and
+// refuses to construct an invalid Relay.
+func (c RelayConfig) Validate() error {
+	if c.DB == nil {
+		return fmt.Errorf("%w: a database is required", messaging.ErrInvalidConfig)
+	}
+	if c.Dialect == nil {
+		return fmt.Errorf("%w: a dialect is required", messaging.ErrInvalidConfig)
+	}
+	if c.Producer == nil {
+		return fmt.Errorf("%w: a producer is required", messaging.ErrInvalidConfig)
+	}
+	if c.BatchSize < 0 {
+		return fmt.Errorf("%w: batch size %d is negative", messaging.ErrInvalidConfig, c.BatchSize)
+	}
+	if c.PollInterval < 0 {
+		return fmt.Errorf("%w: poll interval %s is negative", messaging.ErrInvalidConfig, c.PollInterval)
+	}
+	return nil
+}
+
+// withDefaults returns a copy with zero-valued optional fields replaced
+// by their defaults.
+func (c RelayConfig) withDefaults() RelayConfig {
+	if c.BatchSize == 0 {
+		c.BatchSize = defaultBatchSize
+	}
+	if c.PollInterval == 0 {
+		c.PollInterval = defaultPollInterval
+	}
+	return c
+}
+
+// Relay polls the outbox table and publishes staged rows at-least-once:
+// it claims a batch under the dialect's row lock, publishes each row in
+// id order, and deletes only those the producer confirmed
+// messaging.Persisted.
+//
+// It is exposed as a blocking Run(ctx) error rather than a
+// framework-managed service type; the caller starts it with
+// go r.Run(ctx) or awaits it directly.
+type Relay struct {
+	cfg    RelayConfig
+	logger *slog.Logger
+
+	published metric.Int64Counter
+	failed    metric.Int64Counter
+}
+
+// NewRelay builds a Relay from cfg. It returns an error wrapping
+// messaging.ErrInvalidConfig if cfg is invalid.
+func NewRelay(cfg RelayConfig, opts ...Option) (*Relay, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	o := resolveOptions(opts)
+	r := &Relay{
+		cfg:    cfg.withDefaults(),
+		logger: o.Logger,
+	}
+	if err := r.initMetrics(o.Meter); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (r *Relay) initMetrics(m metric.Meter) error {
+	var err error
+	if r.published, err = m.Int64Counter("messaging.outbox.published",
+		metric.WithDescription("outbox rows published and deleted")); err != nil {
+		return fmt.Errorf("creating published counter: %w", err)
+	}
+	if r.failed, err = m.Int64Counter("messaging.outbox.publish_failures",
+		metric.WithDescription("outbox rows left staged because the publish was not confirmed")); err != nil {
+		return fmt.Errorf("creating publish failure counter: %w", err)
+	}
+	return nil
+}
+
+// Run polls and publishes until ctx is cancelled, at which point it
+// returns nil.
+//
+// Publish and database failures are logged, counted and retried on the
+// next poll rather than ending the loop: the rows they concern stay
+// staged, so a transient broker or database problem costs latency, not
+// events.
+func (r *Relay) Run(ctx context.Context) error {
+	timer := time.NewTimer(r.cfg.PollInterval)
+	defer timer.Stop()
+
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		published, err := r.publishBatch(ctx)
+		switch {
+		case ctx.Err() != nil:
+			return nil
+		case err != nil:
+			r.logger.ErrorContext(ctx, "outbox poll failed", slog.String("error", err.Error()))
+		case published == r.cfg.BatchSize:
+			// A full batch means there is probably a backlog; drain it
+			// without waiting out the poll interval.
+			continue
+		}
+
+		timer.Reset(r.cfg.PollInterval)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+// publishBatch claims one batch and publishes it, returning how many
+// rows were confirmed and deleted.
+//
+// The claim, the publishes and the deletes share one transaction: the
+// row locks the dialect took are held until the deletes commit, so a
+// second relay never sees the rows this one is working on. Rolling back
+// on the way out releases the locks and leaves unconfirmed rows staged.
+func (r *Relay) publishBatch(ctx context.Context) (int, error) {
+	tx, err := r.cfg.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("beginning outbox transaction: %w", err)
+	}
+	// Rollback after a successful Commit is a no-op, so this only has an
+	// effect on the paths that leave rows staged.
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := r.claim(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+
+	published := 0
+	for _, row := range rows {
+		if err := r.publish(ctx, tx, row); err != nil {
+			// Stop at the first unconfirmed row: publishing past it
+			// would reorder events for its key. It and everything after
+			// it stay staged for the next poll.
+			r.failed.Add(ctx, 1, metric.WithAttributes(attribute.String("topic", row.Topic)))
+			r.logger.WarnContext(ctx, "outbox row left staged",
+				slog.Int64("id", row.ID),
+				slog.String("topic", row.Topic),
+				slog.Int("remaining_in_batch", len(rows)-published),
+				slog.String("error", err.Error()),
+			)
+			break
+		}
+		published++
+	}
+
+	if published == 0 {
+		return 0, nil
+	}
+	if err := tx.Commit(); err != nil {
+		// The rows were published but not deleted, so the next poll
+		// republishes them: at-least-once, as documented.
+		return 0, fmt.Errorf("committing %d outbox deletes: %w", published, err)
+	}
+	r.published.Add(ctx, int64(published))
+	return published, nil
+}
+
+// claim reads a locked batch in id order. The rows are fully read before
+// returning, because tx cannot run the deletes while a result set on it
+// is still open.
+func (r *Relay) claim(ctx context.Context, tx *sql.Tx) ([]Row, error) {
+	result, err := tx.QueryContext(ctx, r.cfg.Dialect.ClaimSQL(), r.cfg.BatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("claiming outbox batch: %w", err)
+	}
+	defer func() { _ = result.Close() }()
+
+	var rows []Row
+	for result.Next() {
+		var (
+			row     Row
+			headers []byte
+		)
+		if err := result.Scan(&row.ID, &row.Topic, &row.Key, &row.Value, &headers); err != nil {
+			return nil, fmt.Errorf("scanning outbox row: %w", err)
+		}
+		if row.Headers, err = decodeHeaders(headers); err != nil {
+			return nil, fmt.Errorf("outbox row %d: %w", row.ID, err)
+		}
+		rows = append(rows, row)
+	}
+	if err := result.Err(); err != nil {
+		return nil, fmt.Errorf("reading outbox batch: %w", err)
+	}
+	return rows, nil
+}
+
+// publish sends one row and deletes it, but only once the producer
+// reports messaging.Persisted. Anything less leaves the row for the next
+// poll, so a possibly-lost message is retried rather than dropped.
+func (r *Relay) publish(ctx context.Context, tx *sql.Tx, row Row) error {
+	headers := make(map[string][]byte, len(row.Headers)+1)
+	for k, v := range row.Headers {
+		headers[k] = v
+	}
+	headers[messaging.EventIDHeader] = []byte(strconv.FormatInt(row.ID, 10))
+
+	out, err := r.cfg.Producer.Produce(ctx, row.Topic, row.Key, row.Value, headers)
+	if err != nil {
+		return fmt.Errorf("publishing outbox row %d to %s: %w", row.ID, row.Topic, err)
+	}
+	if out.Status != messaging.Persisted {
+		return fmt.Errorf("publishing outbox row %d to %s: delivery status %s, want %s",
+			row.ID, row.Topic, out.Status, messaging.Persisted)
+	}
+
+	if _, err := tx.ExecContext(ctx, r.cfg.Dialect.DeleteSQL(), row.ID); err != nil {
+		return fmt.Errorf("deleting published outbox row %d: %w", row.ID, err)
+	}
+	return nil
+}
