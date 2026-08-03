@@ -11,25 +11,25 @@ hosted `Runner` is ticket 05).
 **Blocked by:** 01 (root contracts), 02 (kafka producer — reused to
 seed test messages on the broker).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `ConsumerConfig` struct (bootstrap servers, group id, topics,
+- [x] `ConsumerConfig` struct (bootstrap servers, group id, topics,
       key/value format, security, etc.) with `Validate()`; `New` calls
       it.
-- [ ] No builder type — construction is `New(cfg, opts...)` only.
-- [ ] Consumer implements the root `Consumer[K, V]` interface.
-- [ ] Auto-commit is off unconditionally — there is no config knob to
+- [x] No builder type — construction is `New(cfg, opts...)` only.
+- [x] Consumer implements the root `Consumer[K, V]` interface.
+- [x] Auto-commit is off unconditionally — there is no config knob to
       turn it on.
-- [ ] `Consume(ctx)` returns a deserialized `ReceivedMessage[K, V]`,
+- [x] `Consume(ctx)` returns a deserialized `ReceivedMessage[K, V]`,
       correctly surfacing the tombstone case (nil value) without
       attempting to decode it.
-- [ ] `Commit(msg)` commits offset+1 for the message's
+- [x] `Commit(msg)` commits offset+1 for the message's
       topic/partition (matches Kafka's "next offset to read"
       semantics).
-- [ ] `ReadyCheck(ctx) error` reports consumer health.
-- [ ] Integration test (testcontainers, real broker): publish via the
+- [x] `ReadyCheck(ctx) error` reports consumer health.
+- [x] Integration test (testcontainers, real broker): publish via the
       ticket-02 producer, consume+commit via this consumer for each
       supported format, assert the round-tripped value matches and
       the committed offset is correct.
-- [ ] Integration test: a tombstone (nil value) round-trips with
+- [x] Integration test: a tombstone (nil value) round-trips with
       `IsTombstone` true and no deserialization error.

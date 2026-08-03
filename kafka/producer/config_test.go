@@ -1,4 +1,4 @@
-package kafka
+package producer
 
 import (
 	"errors"
@@ -6,71 +6,72 @@ import (
 	"time"
 
 	"github.com/zuksmaq/messaging"
+	"github.com/zuksmaq/messaging/kafka"
 )
 
-func TestProducerConfigValidate(t *testing.T) {
+func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
-	valid := ProducerConfig{
+	valid := Config{
 		BootstrapServers: "localhost:9092",
-		KeyFormat:        FormatString,
-		ValueFormat:      FormatJSON,
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatJSON,
 	}
 
 	tests := []struct {
 		name    string
-		mutate  func(*ProducerConfig)
+		mutate  func(*Config)
 		wantErr bool
 	}{
-		{name: "valid minimal", mutate: func(*ProducerConfig) {}},
+		{name: "valid minimal", mutate: func(*Config) {}},
 		{
 			name:    "missing bootstrap servers",
-			mutate:  func(c *ProducerConfig) { c.BootstrapServers = "" },
+			mutate:  func(c *Config) { c.BootstrapServers = "" },
 			wantErr: true,
 		},
 		{
 			name:    "missing key format",
-			mutate:  func(c *ProducerConfig) { c.KeyFormat = "" },
+			mutate:  func(c *Config) { c.KeyFormat = "" },
 			wantErr: true,
 		},
 		{
 			name:    "missing value format",
-			mutate:  func(c *ProducerConfig) { c.ValueFormat = "" },
+			mutate:  func(c *Config) { c.ValueFormat = "" },
 			wantErr: true,
 		},
 		{
 			name:    "negative flush timeout",
-			mutate:  func(c *ProducerConfig) { c.FlushTimeout = -time.Second },
+			mutate:  func(c *Config) { c.FlushTimeout = -time.Second },
 			wantErr: true,
 		},
 		{
 			name:    "negative produce timeout",
-			mutate:  func(c *ProducerConfig) { c.ProduceTimeout = -time.Second },
+			mutate:  func(c *Config) { c.ProduceTimeout = -time.Second },
 			wantErr: true,
 		},
 		{
 			name:    "unknown security protocol",
-			mutate:  func(c *ProducerConfig) { c.Security.Protocol = "carrier-pigeon" },
+			mutate:  func(c *Config) { c.Security.Protocol = "carrier-pigeon" },
 			wantErr: true,
 		},
 		{
 			name: "sasl without mechanism",
-			mutate: func(c *ProducerConfig) {
-				c.Security = Security{Protocol: SecuritySASLSSL, Username: "u", Password: "p"}
+			mutate: func(c *Config) {
+				c.Security = kafka.Security{Protocol: kafka.SecuritySASLSSL, Username: "u", Password: "p"}
 			},
 			wantErr: true,
 		},
 		{
 			name: "sasl without credentials",
-			mutate: func(c *ProducerConfig) {
-				c.Security = Security{Protocol: SecuritySASLSSL, Mechanism: "PLAIN"}
+			mutate: func(c *Config) {
+				c.Security = kafka.Security{Protocol: kafka.SecuritySASLSSL, Mechanism: "PLAIN"}
 			},
 			wantErr: true,
 		},
 		{
 			name: "sasl fully specified",
-			mutate: func(c *ProducerConfig) {
-				c.Security = Security{Protocol: SecuritySASLSSL, Mechanism: "PLAIN", Username: "u", Password: "p"}
+			mutate: func(c *Config) {
+				c.Security = kafka.Security{Protocol: kafka.SecuritySASLSSL, Mechanism: "PLAIN", Username: "u", Password: "p"}
 			},
 		},
 	}
@@ -99,17 +100,17 @@ func TestProducerConfigValidate(t *testing.T) {
 	}
 }
 
-func TestProducerConfigWithDefaults(t *testing.T) {
+func TestConfigWithDefaults(t *testing.T) {
 	t.Parallel()
 
-	got := ProducerConfig{
+	got := Config{
 		BootstrapServers: "localhost:9092",
-		KeyFormat:        FormatString,
-		ValueFormat:      FormatJSON,
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatJSON,
 	}.withDefaults()
 
-	if got.Security.Protocol != SecurityPlaintext {
-		t.Errorf("Security.Protocol = %q, want %q", got.Security.Protocol, SecurityPlaintext)
+	if got.Security.Protocol != kafka.SecurityPlaintext {
+		t.Errorf("Security.Protocol = %q, want %q", got.Security.Protocol, kafka.SecurityPlaintext)
 	}
 	if got.FlushTimeout != DefaultFlushTimeout {
 		t.Errorf("FlushTimeout = %s, want %s", got.FlushTimeout, DefaultFlushTimeout)
@@ -119,20 +120,20 @@ func TestProducerConfigWithDefaults(t *testing.T) {
 	}
 }
 
-func TestProducerConfigWithDefaultsPreservesExplicitValues(t *testing.T) {
+func TestConfigWithDefaultsPreservesExplicitValues(t *testing.T) {
 	t.Parallel()
 
-	got := ProducerConfig{
+	got := Config{
 		BootstrapServers: "localhost:9092",
-		KeyFormat:        FormatString,
-		ValueFormat:      FormatJSON,
-		Security:         Security{Protocol: SecuritySSL},
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatJSON,
+		Security:         kafka.Security{Protocol: kafka.SecuritySSL},
 		FlushTimeout:     time.Second,
 		ProduceTimeout:   2 * time.Second,
 	}.withDefaults()
 
-	if got.Security.Protocol != SecuritySSL {
-		t.Errorf("Security.Protocol = %q, want %q", got.Security.Protocol, SecuritySSL)
+	if got.Security.Protocol != kafka.SecuritySSL {
+		t.Errorf("Security.Protocol = %q, want %q", got.Security.Protocol, kafka.SecuritySSL)
 	}
 	if got.FlushTimeout != time.Second {
 		t.Errorf("FlushTimeout = %s, want 1s", got.FlushTimeout)

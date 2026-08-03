@@ -1,4 +1,4 @@
-package kafka
+package producer
 
 import (
 	"go.opentelemetry.io/otel/metric"

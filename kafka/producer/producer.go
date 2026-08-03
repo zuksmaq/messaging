@@ -1,4 +1,4 @@
-package kafka
+package producer
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/zuksmaq/messaging"
+	"github.com/zuksmaq/messaging/kafka"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -17,7 +18,7 @@ import (
 var _ messaging.Producer[string, []byte] = (*Producer[string, []byte])(nil)
 
 // Producer publishes messages to Kafka, serializing keys and values in
-// the formats named by its ProducerConfig. It implements
+// the formats named by its Config. It implements
 // messaging.Producer[K, V].
 //
 // Produce awaits the broker acknowledgement before returning; the
@@ -25,14 +26,14 @@ var _ messaging.Producer[string, []byte] = (*Producer[string, []byte])(nil)
 // successful Produce reports messaging.Persisted.
 type Producer[K, V any] struct {
 	client *ckafka.Producer
-	cfg    ProducerConfig
+	cfg    Config
 	logger *slog.Logger
 
 	// drained closes once the background events reader has exited.
 	drained chan struct{}
 
-	keySer   Serializer[K]
-	valueSer Serializer[V]
+	keySer   kafka.Serializer[K]
+	valueSer kafka.Serializer[V]
 
 	produced  metric.Int64Counter
 	failed    metric.Int64Counter
@@ -43,22 +44,22 @@ type Producer[K, V any] struct {
 // New builds a Producer from cfg. It returns an error wrapping
 // messaging.ErrInvalidConfig if cfg is invalid or if K or V cannot be
 // encoded in the configured format.
-func New[K, V any](cfg ProducerConfig, opts ...Option) (*Producer[K, V], error) {
+func New[K, V any](cfg Config, opts ...kafka.Option) (*Producer[K, V], error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	cfg = cfg.withDefaults()
 
-	keySer, err := serializerFor[K](cfg.KeyFormat)
+	keySer, err := kafka.SerializerFor[K](cfg.KeyFormat)
 	if err != nil {
 		return nil, fmt.Errorf("key format: %w", err)
 	}
-	valueSer, err := serializerFor[V](cfg.ValueFormat)
+	valueSer, err := kafka.SerializerFor[V](cfg.ValueFormat)
 	if err != nil {
 		return nil, fmt.Errorf("value format: %w", err)
 	}
 
-	o := resolveOptions(opts)
+	o := kafka.ResolveOptions(opts)
 
 	client, err := ckafka.NewProducer(clientConfig(cfg))
 	if err != nil {
@@ -68,12 +69,12 @@ func New[K, V any](cfg ProducerConfig, opts ...Option) (*Producer[K, V], error) 
 	p := &Producer[K, V]{
 		client:   client,
 		cfg:      cfg,
-		logger:   o.logger,
+		logger:   o.Logger,
 		drained:  make(chan struct{}),
 		keySer:   keySer,
 		valueSer: valueSer,
 	}
-	if err := p.initMetrics(o.meter); err != nil {
+	if err := p.initMetrics(o.Meter); err != nil {
 		client.Close()
 		return nil, err
 	}
@@ -104,27 +105,6 @@ func (p *Producer[K, V]) drainEvents() {
 		}
 		p.logger.Debug("kafka producer client error", slog.String("error", err.Error()))
 	}
-}
-
-// clientConfig maps a ProducerConfig onto librdkafka settings.
-// Idempotence is always on: it pins acks=all and a max-in-flight
-// consistent with ordering, so a delivered message is durably
-// replicated.
-func clientConfig(cfg ProducerConfig) *ckafka.ConfigMap {
-	cm := &ckafka.ConfigMap{
-		"bootstrap.servers":  cfg.BootstrapServers,
-		"enable.idempotence": true,
-		"security.protocol":  string(cfg.Security.Protocol),
-	}
-	if cfg.Security.sasl() {
-		_ = cm.SetKey("sasl.mechanism", cfg.Security.Mechanism)
-		_ = cm.SetKey("sasl.username", cfg.Security.Username)
-		_ = cm.SetKey("sasl.password", cfg.Security.Password)
-	}
-	if cfg.Security.CALocation != "" {
-		_ = cm.SetKey("ssl.ca.location", cfg.Security.CALocation)
-	}
-	return cm
 }
 
 func (p *Producer[K, V]) initMetrics(m metric.Meter) error {
