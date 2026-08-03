@@ -34,7 +34,15 @@ database-agnostic.
   be deserialized or a `Handler` returns an error: `Skip` (log, count,
   commit past it), `DeadLetter` (forward to a dead-letter topic, only
   commit once that publish is confirmed), `Halt` (stop without
-  committing; message is re-delivered on restart). Never silent.
+  committing; message is re-delivered on restart). Never silent. The
+  zero `RunnerConfig` selects `Halt`: nothing is dropped until the
+  caller asks for it.
+- **RawKey / RawValue** — the key and value as the broker delivered
+  them, carried on every `ReceivedMessage` alongside the decoded ones.
+  They survive a deserialization failure, which is what lets
+  `DeadLetter` forward the original bytes through a
+  `Producer[[]byte, []byte]` even when the decoded key and value are
+  still zero.
 - **DeliveryStatus** — how durably a produced message was persisted:
   `NotPersisted` / `PossiblyPersisted` / `Persisted`. The outbox relay
   requires `Persisted` before deleting a row.

@@ -61,6 +61,15 @@ type ProducedMessage struct {
 // content plus the coordinates the broker assigned it.
 type ReceivedMessage[K, V any] struct {
 	Message[K, V]
+
+	// RawKey and RawValue are the key and value exactly as the broker
+	// delivered them, before deserialization. They survive a
+	// deserialization failure, so a poison-message policy can forward
+	// the original bytes to a dead-letter topic even when Key and Value
+	// are still zero.
+	RawKey   []byte
+	RawValue []byte
+
 	Topic     string
 	Partition int32
 	Offset    int64
