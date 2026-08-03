@@ -11,6 +11,7 @@ import (
 	"github.com/zuksmaq/messaging"
 	"github.com/zuksmaq/messaging/outbox"
 	"github.com/zuksmaq/messaging/outbox/postgres"
+	"github.com/zuksmaq/messaging/outbox/sqlserver"
 )
 
 // nopProducer satisfies messaging.Producer for the config tests, which
@@ -162,6 +163,32 @@ func TestPostgresDialectSQL(t *testing.T) {
 		{"claim is bounded", d.ClaimSQL(), "LIMIT $1"},
 		{"insert targets the table", d.InsertSQL(), postgres.Table},
 		{"delete is by id", d.DeleteSQL(), "WHERE id = $1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if !strings.Contains(tt.sql, tt.want) {
+				t.Errorf("SQL %q does not contain %q", tt.sql, tt.want)
+			}
+		})
+	}
+}
+
+// TestSQLServerDialectSQL pins the same guarantees for SQL Server:
+// UPDLOCK holds the claim's locks past the SELECT, READPAST skips the
+// rows another relay holds instead of blocking on them, and ROWLOCK stops
+// a lock escalation from hiding unclaimed rows behind a claimed one.
+func TestSQLServerDialectSQL(t *testing.T) {
+	t.Parallel()
+
+	var d outbox.Dialect = sqlserver.Dialect{}
+
+	for _, tt := range []struct{ name, sql, want string }{
+		{"claim locks", d.ClaimSQL(), "UPDLOCK, READPAST, ROWLOCK"},
+		{"claim is ordered", d.ClaimSQL(), "ORDER BY id"},
+		{"claim is bounded", d.ClaimSQL(), "TOP (@p1)"},
+		{"insert targets the table", d.InsertSQL(), sqlserver.Table},
+		{"delete is by id", d.DeleteSQL(), "WHERE id = @p1"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
