@@ -14,13 +14,16 @@ import (
 	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
 )
 
+// brokerImage is the single-node Kafka image every helper here starts.
+const brokerImage = "confluentinc/confluent-local:7.6.1"
+
 // Brokers starts a single-node Kafka container for the duration of the
 // test and returns its bootstrap servers string.
 func Brokers(t *testing.T) string {
 	t.Helper()
 
 	ctx := context.Background()
-	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1")
+	container, err := tckafka.Run(ctx, brokerImage)
 	if err != nil {
 		t.Fatalf("starting kafka container: %v", err)
 	}

@@ -35,6 +35,9 @@ type Producer[K, V any] struct {
 	keySer   kafka.Serializer[K]
 	valueSer kafka.Serializer[V]
 
+	// registry is nil unless a configured format needs one.
+	registry *kafka.SchemaRegistry
+
 	produced  metric.Int64Counter
 	failed    metric.Int64Counter
 	unflushed metric.Int64Counter
@@ -50,12 +53,19 @@ func New[K, V any](cfg Config, opts ...kafka.Option) (*Producer[K, V], error) {
 	}
 	cfg = cfg.withDefaults()
 
-	keySer, err := kafka.SerializerFor[K](cfg.KeyFormat)
+	registry, err := kafka.NewSchemaRegistry(cfg.SchemaRegistry)
 	if err != nil {
+		return nil, err
+	}
+
+	keySer, err := kafka.SerializerFor[K](cfg.KeyFormat, kafka.KeyPart, registry)
+	if err != nil {
+		_ = registry.Close()
 		return nil, fmt.Errorf("key format: %w", err)
 	}
-	valueSer, err := kafka.SerializerFor[V](cfg.ValueFormat)
+	valueSer, err := kafka.SerializerFor[V](cfg.ValueFormat, kafka.ValuePart, registry)
 	if err != nil {
+		_ = registry.Close()
 		return nil, fmt.Errorf("value format: %w", err)
 	}
 
@@ -63,6 +73,7 @@ func New[K, V any](cfg Config, opts ...kafka.Option) (*Producer[K, V], error) {
 
 	client, err := ckafka.NewProducer(clientConfig(cfg))
 	if err != nil {
+		_ = registry.Close()
 		return nil, fmt.Errorf("%w: creating producer: %v", messaging.ErrBroker, err)
 	}
 
@@ -73,9 +84,11 @@ func New[K, V any](cfg Config, opts ...kafka.Option) (*Producer[K, V], error) {
 		drained:  make(chan struct{}),
 		keySer:   keySer,
 		valueSer: valueSer,
+		registry: registry,
 	}
 	if err := p.initMetrics(o.Meter); err != nil {
 		client.Close()
+		_ = registry.Close()
 		return nil, err
 	}
 	go p.drainEvents()
@@ -243,6 +256,10 @@ func (p *Producer[K, V]) Close(ctx context.Context) error {
 	p.client.Close()
 	<-p.drained
 
+	// A registry failure is reported only when nothing worse happened:
+	// un-acknowledged messages are the more urgent news.
+	registryErr := p.registry.Close()
+
 	if remaining > 0 {
 		p.unflushed.Add(ctx, int64(remaining))
 		p.logger.WarnContext(ctx, "producer closed with un-acknowledged messages",
@@ -250,7 +267,7 @@ func (p *Producer[K, V]) Close(ctx context.Context) error {
 			slog.Duration("flush_timeout", timeout))
 		return fmt.Errorf("%w: %d message(s) un-acknowledged after %s flush", messaging.ErrBroker, remaining, timeout)
 	}
-	return nil
+	return registryErr
 }
 
 // ReadyCheck reports whether the producer can reach the cluster.

@@ -30,4 +30,18 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 			t.Errorf("New error = %v, want ErrInvalidConfig", err)
 		}
 	})
+
+	// Avro without a registry must fail here, not at the first publish.
+	t.Run("avro without a schema registry", func(t *testing.T) {
+		t.Parallel()
+		type order struct{ ID string }
+		_, err := New[string, order](Config{
+			BootstrapServers: "localhost:9092",
+			KeyFormat:        kafka.FormatString,
+			ValueFormat:      kafka.FormatAvro,
+		})
+		if !errors.Is(err, messaging.ErrSchemaRegistryRequired) {
+			t.Errorf("New error = %v, want ErrSchemaRegistryRequired", err)
+		}
+	})
 }

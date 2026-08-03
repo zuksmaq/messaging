@@ -49,6 +49,10 @@ type Config struct {
 	// empty.
 	Security kafka.Security
 
+	// SchemaRegistry is required when KeyFormat or ValueFormat needs one
+	// (kafka.FormatAvro) and ignored otherwise.
+	SchemaRegistry kafka.SchemaRegistryConfig
+
 	// OffsetReset defaults to OffsetEarliest, so a new group reads the
 	// backlog rather than silently skipping it.
 	OffsetReset OffsetReset
@@ -89,6 +93,9 @@ func (c Config) Validate() error {
 	}
 	if c.ReadyCheckTimeout < 0 {
 		return fmt.Errorf("%w: ready check timeout must not be negative", messaging.ErrInvalidConfig)
+	}
+	if err := kafka.ValidateSchemaRegistry(c.SchemaRegistry, c.KeyFormat, c.ValueFormat); err != nil {
+		return err
 	}
 	return c.Security.Validate()
 }
