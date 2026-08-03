@@ -1,0 +1,377 @@
+//go:build integration
+
+// Integration tests for the outbox against a real Postgres database and
+// a fake Producer. They exercise the public API only — Enqueue on the
+// caller's transaction, Relay.Run, and the Postgres dialect's claim SQL
+// — and assert on observable state: what the producer received and which
+// rows remain staged.
+package outbox_test
+
+import (
+	"context"
+	"database/sql"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/zuksmaq/messaging"
+	"github.com/zuksmaq/messaging/outbox"
+	"github.com/zuksmaq/messaging/outbox/internal/pgtest"
+	"github.com/zuksmaq/messaging/outbox/postgres"
+)
+
+// pollInterval keeps the tests quick; the relay's default of a second
+// would dominate their runtime.
+const pollInterval = 20 * time.Millisecond
+
+// event is one staged event a test enqueues.
+type event struct {
+	topic   string
+	key     string
+	value   string
+	headers map[string][]byte
+}
+
+// TestEnqueueCommitsWithTheCallersTransaction proves the outbox row and
+// the caller's own business write share one transaction: rolling back
+// takes the outbox row with it, so there is no window where an event is
+// published for work that never committed.
+func TestEnqueueCommitsWithTheCallersTransaction(t *testing.T) {
+	db := pgtest.DB(t)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `CREATE TABLE orders (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("creating business table: %v", err)
+	}
+	ob, err := outbox.New(postgres.Dialect{})
+	if err != nil {
+		t.Fatalf("building outbox: %v", err)
+	}
+
+	stage := func(t *testing.T, orderID string, commit bool) {
+		t.Helper()
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("beginning transaction: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.ExecContext(ctx, `INSERT INTO orders (id) VALUES ($1)`, orderID); err != nil {
+			t.Fatalf("inserting business row: %v", err)
+		}
+		if err := ob.Enqueue(ctx, tx, "orders", []byte(orderID), []byte(`{"placed":true}`), nil); err != nil {
+			t.Fatalf("enqueueing: %v", err)
+		}
+		if commit {
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("committing: %v", err)
+			}
+		}
+	}
+
+	t.Run("rollback discards the outbox row too", func(t *testing.T) {
+		stage(t, "rolled-back", false)
+
+		if n := pgtest.Count(t, db); n != 0 {
+			t.Errorf("outbox rows after rollback = %d, want 0", n)
+		}
+		if n := countOrders(t, db); n != 0 {
+			t.Errorf("business rows after rollback = %d, want 0", n)
+		}
+	})
+
+	t.Run("commit keeps both", func(t *testing.T) {
+		stage(t, "committed", true)
+
+		if n := pgtest.Count(t, db); n != 1 {
+			t.Errorf("outbox rows after commit = %d, want 1", n)
+		}
+		if n := countOrders(t, db); n != 1 {
+			t.Errorf("business rows after commit = %d, want 1", n)
+		}
+	})
+}
+
+// TestRelayPublishesStagedRowsThenDeletesThem covers the happy path: a
+// batch staged in one transaction is published in id order with the
+// row's id stamped as the event id, and the rows are gone afterwards.
+func TestRelayPublishesStagedRowsThenDeletesThem(t *testing.T) {
+	db := pgtest.DB(t)
+
+	ids := enqueueAll(t, db, []event{
+		{topic: "orders", key: "k1", value: "v1", headers: map[string][]byte{"trace": []byte("abc")}},
+		{topic: "orders", key: "k2", value: "v2"},
+		{topic: "shipments", key: "k3", value: "v3"},
+	})
+
+	p := &fakeProducer{}
+	startRelay(t, db, p, 10)
+
+	pgtest.WaitFor(t, "the outbox to drain", func() bool { return pgtest.Count(t, db) == 0 })
+
+	calls := p.calls()
+	assertEventIDsMatchRowIDs(t, calls, ids)
+
+	want := []publish{
+		{Topic: "orders", Key: []byte("k1"), Value: []byte("v1")},
+		{Topic: "orders", Key: []byte("k2"), Value: []byte("v2")},
+		{Topic: "shipments", Key: []byte("k3"), Value: []byte("v3")},
+	}
+	for i, w := range want {
+		got := calls[i]
+		if got.Topic != w.Topic || string(got.Key) != string(w.Key) || string(got.Value) != string(w.Value) {
+			t.Errorf("publish %d = %s/%q/%q, want %s/%q/%q",
+				i, got.Topic, got.Key, got.Value, w.Topic, w.Key, w.Value)
+		}
+	}
+
+	// The staged headers survive alongside the event id the relay adds.
+	if got := string(calls[0].Headers["trace"]); got != "abc" {
+		t.Errorf("staged header trace = %q, want abc", got)
+	}
+	if len(calls[1].Headers) != 1 {
+		t.Errorf("headers on a row staged without any = %v, want only the event id", calls[1].Headers)
+	}
+}
+
+// TestRelayStopsAtTheFirstUnconfirmedRow covers the ordering guarantee:
+// a row the producer would not confirm stays staged, and so does every
+// row behind it, rather than the relay skipping ahead and reordering a
+// key's events.
+func TestRelayStopsAtTheFirstUnconfirmedRow(t *testing.T) {
+	db := pgtest.DB(t)
+
+	ids := enqueueAll(t, db, []event{
+		{topic: "orders", key: "k1", value: "v1"},
+		{topic: "orders", key: "k2", value: "v2"},
+		{topic: "orders", key: "k3", value: "v3"},
+	})
+
+	// The second row is acknowledged but not durably, which must not be
+	// good enough to delete it.
+	p := &fakeProducer{status: func(value []byte) messaging.DeliveryStatus {
+		if string(value) == "v2" {
+			return messaging.PossiblyPersisted
+		}
+		return messaging.Persisted
+	}}
+	startRelay(t, db, p, 10)
+
+	pgtest.WaitFor(t, "the confirmed row to be deleted", func() bool { return pgtest.Count(t, db) == 2 })
+
+	if got := pgtest.IDs(t, db); !slices.Equal(got, ids[1:]) {
+		t.Errorf("staged ids = %v, want %v", got, ids[1:])
+	}
+	// Give the relay several more polls to prove it stays stuck at v2
+	// instead of eventually publishing past it.
+	time.Sleep(10 * pollInterval)
+	if slices.Contains(p.values(), "v3") {
+		t.Errorf("v3 was published despite v2 never being confirmed: %v", p.values())
+	}
+	if n := pgtest.Count(t, db); n != 2 {
+		t.Errorf("staged rows = %d, want 2", n)
+	}
+
+	// Once the producer confirms it, the batch drains in order from the
+	// row it stopped at.
+	p.setStatus(nil)
+	pgtest.WaitFor(t, "the outbox to drain", func() bool { return pgtest.Count(t, db) == 0 })
+
+	values := p.values()
+	if got := values[len(values)-2:]; !slices.Equal(got, []string{"v2", "v3"}) {
+		t.Errorf("last published values = %v, want [v2 v3]", got)
+	}
+}
+
+// TestConcurrentRelaysClaimDisjointRows proves the Postgres FOR UPDATE
+// SKIP LOCKED claim lets two relays work the same table at once. Each
+// producer blocks on its first publish until both relays have reached
+// one: that can only happen if the second relay claimed rows the first
+// had not locked, so a claim that blocked instead would fail the test.
+func TestConcurrentRelaysClaimDisjointRows(t *testing.T) {
+	db := pgtest.DB(t)
+
+	ids := enqueueAll(t, db, []event{
+		{topic: "orders", key: "k1", value: "v1"},
+		{topic: "orders", key: "k2", value: "v2"},
+		{topic: "orders", key: "k3", value: "v3"},
+		{topic: "orders", key: "k4", value: "v4"},
+	})
+
+	var (
+		mu         sync.Mutex
+		arrived    int
+		released   = make(chan struct{})
+		serialized bool
+	)
+	// enter blocks the calling relay until the other one is also
+	// mid-publish. Giving up means the other relay could not get a batch
+	// while this one held its rows — a serialized claim — which the
+	// assertion below reports rather than letting the test hang.
+	enter := func() {
+		mu.Lock()
+		arrived++
+		if arrived == 2 {
+			close(released)
+		}
+		mu.Unlock()
+
+		select {
+		case <-released:
+		case <-time.After(5 * time.Second):
+			mu.Lock()
+			serialized = true
+			mu.Unlock()
+		}
+	}
+
+	producers := make([]*fakeProducer, 2)
+	for i := range producers {
+		var once sync.Once
+		p := &fakeProducer{}
+		p.beforeProduce = func() { once.Do(enter) }
+		producers[i] = p
+		// Two rows each, so both relays have work to claim.
+		startRelay(t, db, p, 2)
+	}
+
+	pgtest.WaitFor(t, "the outbox to drain", func() bool { return pgtest.Count(t, db) == 0 })
+
+	mu.Lock()
+	blocked := serialized
+	mu.Unlock()
+	if blocked {
+		t.Error("the two relays never published concurrently: a claim blocked on the other relay's locked rows instead of skipping them")
+	}
+
+	// Every row published exactly once, across both relays.
+	var gotIDs []string
+	for _, p := range producers {
+		for _, c := range p.calls() {
+			gotIDs = append(gotIDs, c.EventID())
+		}
+	}
+	slices.Sort(gotIDs)
+	want := make([]string, len(ids))
+	for i, id := range ids {
+		want[i] = eventID(id)
+	}
+	slices.Sort(want)
+	if !slices.Equal(gotIDs, want) {
+		t.Errorf("published event ids = %v, want each of %v exactly once", gotIDs, want)
+	}
+}
+
+// TestRunReturnsWhenContextIsCancelled covers shutdown: Run is a
+// blocking loop, so cancelling its context must end it promptly and
+// without error.
+func TestRunReturnsWhenContextIsCancelled(t *testing.T) {
+	db := pgtest.DB(t)
+	enqueueAll(t, db, []event{{topic: "orders", key: "k1", value: "v1"}})
+
+	relay, err := outbox.NewRelay(outbox.RelayConfig{
+		DB:           db,
+		Dialect:      postgres.Dialect{},
+		Producer:     &fakeProducer{},
+		BatchSize:    10,
+		PollInterval: time.Hour, // parked between polls, so this tests the wait path
+	})
+	if err != nil {
+		t.Fatalf("building relay: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- relay.Run(ctx) }()
+
+	// Let it finish its first poll, then stop it.
+	pgtest.WaitFor(t, "the first poll to publish", func() bool { return pgtest.Count(t, db) == 0 })
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run after cancel = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of cancelling its context")
+	}
+}
+
+// startRelay runs a relay against db for the duration of the test,
+// stopping it during cleanup.
+func startRelay(t *testing.T, db *sql.DB, p *fakeProducer, batchSize int) {
+	t.Helper()
+
+	relay, err := outbox.NewRelay(outbox.RelayConfig{
+		DB:           db,
+		Dialect:      postgres.Dialect{},
+		Producer:     p,
+		BatchSize:    batchSize,
+		PollInterval: pollInterval,
+	})
+	if err != nil {
+		t.Fatalf("building relay: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- relay.Run(ctx) }()
+
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run = %v, want nil", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("Run did not return within 5s of cancelling its context")
+		}
+	})
+}
+
+// enqueueAll stages events in a single transaction and returns the ids
+// the database assigned them, in order.
+func enqueueAll(t *testing.T, db *sql.DB, events []event) []int64 {
+	t.Helper()
+
+	ob, err := outbox.New(postgres.Dialect{})
+	if err != nil {
+		t.Fatalf("building outbox: %v", err)
+	}
+
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("beginning transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for _, e := range events {
+		if err := ob.Enqueue(ctx, tx, e.topic, []byte(e.key), []byte(e.value), e.headers); err != nil {
+			t.Fatalf("enqueueing %s: %v", e.value, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("committing staged events: %v", err)
+	}
+
+	ids := pgtest.IDs(t, db)
+	if len(ids) != len(events) {
+		t.Fatalf("staged %d rows, want %d", len(ids), len(events))
+	}
+	return ids
+}
+
+func countOrders(t *testing.T, db *sql.DB) int {
+	t.Helper()
+
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM orders`).Scan(&n); err != nil {
+		t.Fatalf("counting business rows: %v", err)
+	}
+	return n
+}
