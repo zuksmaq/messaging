@@ -9,25 +9,32 @@ sentinel errors (wrapped with `%w`, checked via `errors.Is`/
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Producer[K, V]` interface defined in the root module: a
+- [x] `Producer[K, V]` interface defined in the root module: a
       `Produce`-style method that awaits broker acknowledgement and
       returns a `ProducedMessage` (topic, partition, offset,
       `DeliveryStatus`), plus a flush/close method.
-- [ ] `Consumer[K, V]` interface defined: a `Consume`/`Commit`-style
+- [x] `Consumer[K, V]` interface defined: a `Consume`/`Commit`-style
       pair, auto-commit intentionally absent from the contract.
-- [ ] `DeliveryStatus` enum: `NotPersisted` / `PossiblyPersisted` /
+- [x] `DeliveryStatus` enum: `NotPersisted` / `PossiblyPersisted` /
       `Persisted`.
-- [ ] `ReceivedMessage[K, V]` carries topic/partition/offset/key/value/
+- [x] `ReceivedMessage[K, V]` carries topic/partition/offset/key/value/
       headers/timestamp and exposes the tombstone case (nil value) and
       the `EventId` derived from the `event-id` header.
-- [ ] `EventId` header name is an exported constant, usable by both
+- [x] `EventId` header name is an exported constant, usable by both
       the `kafka` and `outbox`/`inbox` modules without a Kafka-specific
       dependency.
-- [ ] Sentinel errors exist for the categories callers need to branch
+- [x] Sentinel errors exist for the categories callers need to branch
       on (serialization failure, deserialization failure, schema-
       registry-required, configuration invalid, producer/consumer
       broker error) — no exception-style type hierarchy.
-- [ ] Package compiles standalone (`go build ./...` at the root module)
+- [x] Package compiles standalone (`go build ./...` at the root module)
       with no dependency on the `kafka`/`outbox`/`inbox` submodules.
+
+## Comments
+
+Implemented in `message.go` (types + DeliveryStatus + EventIDHeader),
+`producer.go`, `consumer.go`, `errors.go`. Verified with
+`GOWORK=off go build ./... && GOWORK=off go vet ./...` from the root
+module.
