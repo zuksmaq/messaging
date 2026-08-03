@@ -115,8 +115,9 @@ func (c *Consumer[K, V]) initMetrics(m metric.Meter) error {
 //
 // A message whose key or value cannot be deserialized is returned with a
 // non-nil error wrapping messaging.ErrDeserialization; the returned
-// ReceivedMessage still carries the topic, partition and offset, so a
-// caller applying a poison-message policy can commit past it.
+// ReceivedMessage still carries the topic, partition and offset plus the
+// undecoded RawKey/RawValue, so a caller applying a poison-message
+// policy can commit past it or dead-letter the original bytes.
 func (c *Consumer[K, V]) Consume(ctx context.Context) (messaging.ReceivedMessage[K, V], error) {
 	var zero messaging.ReceivedMessage[K, V]
 	for {
@@ -147,6 +148,8 @@ func (c *Consumer[K, V]) decode(ctx context.Context, m *ckafka.Message) (messagi
 	attrs := metric.WithAttributes(attribute.String("topic", topic))
 
 	out := messaging.ReceivedMessage[K, V]{
+		RawKey:    m.Key,
+		RawValue:  m.Value,
 		Topic:     topic,
 		Partition: m.TopicPartition.Partition,
 		Offset:    int64(m.TopicPartition.Offset),
