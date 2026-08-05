@@ -76,6 +76,19 @@ func TestRelayConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "lease timeout set",
+			cfg: outbox.RelayConfig{
+				DB: db, Dialect: postgres.Dialect{}, Producer: nopProducer{}, LeaseTimeout: 30 * time.Second,
+			},
+		},
+		{
+			name: "negative lease timeout",
+			cfg: outbox.RelayConfig{
+				DB: db, Dialect: postgres.Dialect{}, Producer: nopProducer{}, LeaseTimeout: -time.Second,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -171,6 +184,22 @@ func TestPostgresDialectSQL(t *testing.T) {
 				t.Errorf("SQL %q does not contain %q", tt.sql, tt.want)
 			}
 		})
+	}
+}
+
+// TestPostgresLeaseSQL pins the claim lease/timeout mechanism: Relay
+// sets this per claiming transaction so Postgres itself aborts one left
+// idle past timeout, releasing the row locks FOR UPDATE took instead of
+// leaving them held until something else notices the dead connection.
+func TestPostgresLeaseSQL(t *testing.T) {
+	t.Parallel()
+
+	got := postgres.Dialect{}.LeaseSQL(30 * time.Second)
+	if !strings.Contains(got, "idle_in_transaction_session_timeout") {
+		t.Errorf("LeaseSQL(30s) = %q, want it to set idle_in_transaction_session_timeout", got)
+	}
+	if !strings.Contains(got, "30000") {
+		t.Errorf("LeaseSQL(30s) = %q, want the timeout expressed in milliseconds", got)
 	}
 }
 

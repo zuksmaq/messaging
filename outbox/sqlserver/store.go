@@ -1,6 +1,13 @@
 // Package sqlserver supplies the SQL Server SQL the outbox core needs,
 // claiming batches with UPDLOCK/READPAST so concurrent relays take
 // disjoint rows.
+//
+// Unlike Postgres, SQL Server has no session-level idle-in-transaction
+// timeout to set, so Dialect does not implement outbox's optional
+// claim-lease-timeout interface: a relay abandoning a claim here is
+// reclaimed only once SQL Server notices the dropped connection.
+// Configure TCP keepalive on the connection (e.g. this driver's
+// "keepAlive" DSN parameter, in seconds) to bound that detection window.
 package sqlserver
 
 // Table is the outbox table every statement here targets.

@@ -10,15 +10,15 @@ incidental, unbounded connection-drop detection.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Relay`'s documented configuration includes an explicit,
+- [x] `Relay`'s documented configuration includes an explicit,
       bounded timeout (and keepalive, where the driver supports it)
       for claim-holding database connections.
-- [ ] A row claimed by a relay instance that then disappears (e.g.
+- [x] A row claimed by a relay instance that then disappears (e.g.
       its connection is killed) becomes claimable again by another
       relay instance within the documented bound, rather than being
       stuck indefinitely.
-- [ ] A test simulates an abandoned claim (e.g. killing the claiming
+- [x] A test simulates an abandoned claim (e.g. killing the claiming
       connection) and asserts the row becomes claimable again within
       the documented bound.

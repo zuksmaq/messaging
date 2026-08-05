@@ -18,6 +18,7 @@ const (
 	defaultBatchSize    = 100
 	defaultPollInterval = time.Second
 	defaultMaxAttempts  = 5
+	defaultLeaseTimeout = 30 * time.Second
 )
 
 // RelayConfig configures the polling relay. DB, Dialect and Producer are
@@ -46,6 +47,22 @@ type RelayConfig struct {
 	// it is quarantined: excluded from future claims so it stops
 	// blocking rows staged after it. Defaults to 5.
 	MaxAttempts int
+
+
+	// LeaseTimeout bounds how long a claiming transaction may sit idle
+	// before the database itself aborts it and releases the row locks
+	// the claim took. This is what reclaims a batch a relay abandoned
+	// mid-claim — killed outright, or its connection dropped invisibly
+	// to a pooler — within a bounded, documented window, rather than
+	// leaving the rows locked until something else notices the dead
+	// connection. Defaults to 30 seconds.
+	//
+	// Only applied against a Dialect that supports it (Postgres, via
+	// idle_in_transaction_session_timeout); a dialect without a
+	// session-level timeout to set ignores it. See the Dialect
+	// implementations' docs for what else, if anything, to configure on
+	// the underlying connection for that database.
+	LeaseTimeout time.Duration
 }
 
 // Validate reports whether the config is usable. NewRelay calls it and
@@ -69,6 +86,9 @@ func (c RelayConfig) Validate() error {
 	if c.MaxAttempts < 0 {
 		return fmt.Errorf("%w: max attempts %d is negative", messaging.ErrInvalidConfig, c.MaxAttempts)
 	}
+	if c.LeaseTimeout < 0 {
+		return fmt.Errorf("%w: lease timeout %s is negative", messaging.ErrInvalidConfig, c.LeaseTimeout)
+	}
 	return nil
 }
 
@@ -84,7 +104,22 @@ func (c RelayConfig) withDefaults() RelayConfig {
 	if c.MaxAttempts == 0 {
 		c.MaxAttempts = defaultMaxAttempts
 	}
+	if c.LeaseTimeout == 0 {
+		c.LeaseTimeout = defaultLeaseTimeout
+	}
 	return c
+}
+
+// leaseDialect is implemented by a Dialect whose database supports
+// bounding how long a claiming transaction may sit idle before the
+// database aborts it itself, releasing the claim's row locks. It is
+// optional: Relay checks for it with a type assertion rather than
+// requiring every Dialect to implement it, so adding support for a new
+// database's session timeout later is not a breaking change to Dialect.
+type leaseDialect interface {
+	// LeaseSQL returns the statement that sets the claiming
+	// transaction's idle-abort timeout to d.
+	LeaseSQL(d time.Duration) string
 }
 
 // Relay polls the outbox table and publishes staged rows at-least-once:
@@ -106,6 +141,14 @@ func (c RelayConfig) withDefaults() RelayConfig {
 // publishing a same-key row the other left behind for a later batch.
 // Running multiple instances against the same table is a deliberate
 // throughput-for-ordering trade-off, not a bug.
+//
+// A claiming transaction's row locks are held by the database, not by
+// the relay process, so a relay killed mid-batch (or whose connection
+// drops invisibly to a pooler) leaves them locked until the database
+// itself notices. RelayConfig.LeaseTimeout bounds that window on a
+// Dialect that supports a session-level idle timeout (Postgres); see its
+// doc comment for what to configure on the connection for a dialect that
+// doesn't.
 type Relay struct {
 	cfg    RelayConfig
 	logger *slog.Logger
@@ -204,6 +247,10 @@ func (r *Relay) publishBatch(ctx context.Context) (int, error) {
 	// effect on the paths that leave rows staged.
 	defer func() { _ = tx.Rollback() }()
 
+	if err := r.setLeaseTimeout(ctx, tx); err != nil {
+		return 0, err
+	}
+
 	rows, err := r.claim(ctx, tx)
 	if err != nil {
 		return 0, err
@@ -287,6 +334,20 @@ func (r *Relay) recordFailure(ctx context.Context, tx *sql.Tx, row Row) (bool, e
 		slog.Int("attempts", attempts),
 	)
 	return true, nil
+}
+
+// setLeaseTimeout bounds how long tx may sit idle before the database
+// aborts it, releasing the claim's row locks. It is a no-op unless the
+// dialect supports a session-level timeout to set.
+func (r *Relay) setLeaseTimeout(ctx context.Context, tx *sql.Tx) error {
+	ld, ok := r.cfg.Dialect.(leaseDialect)
+	if !ok {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, ld.LeaseSQL(r.cfg.LeaseTimeout)); err != nil {
+		return fmt.Errorf("setting outbox claim lease timeout: %w", err)
+	}
+	return nil
 }
 
 // claim reads a locked batch in id order. The rows are fully read before
