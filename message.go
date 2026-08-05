@@ -1,7 +1,6 @@
 package messaging
 
 import (
-	"reflect"
 	"time"
 )
 
@@ -79,13 +78,7 @@ type ReceivedMessage[K, V any] struct {
 // Tombstone reports whether this message is a tombstone (a nil
 // value), used by log-compacted topics to mark a key for deletion.
 func (m ReceivedMessage[K, V]) Tombstone() bool {
-	v := reflect.ValueOf(m.Value)
-	switch v.Kind() {
-	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func:
-		return v.IsNil()
-	default:
-		return false
-	}
+	return m.RawValue == nil
 }
 
 // EventID returns the EventIDHeader value, or "" if absent.
