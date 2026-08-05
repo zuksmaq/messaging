@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"strconv"
 
 	"github.com/zuksmaq/messaging"
@@ -27,7 +28,24 @@ const (
 	DeadLetterPartitionHeader = "dead-letter-source-partition"
 	// DeadLetterOffsetHeader carries the offset it was read at.
 	DeadLetterOffsetHeader = "dead-letter-source-offset"
+
+	// DeadLetterPreviousHeaderPrefix namespaces a message's existing
+	// dead-letter headers when it is dead-lettered again — e.g. a DLQ
+	// consumer replaying it after a failed fix. Without this, the second
+	// pass would silently overwrite the first pass's error/topic/
+	// partition/offset with its own, losing the original failure's
+	// context.
+	DeadLetterPreviousHeaderPrefix = "previous-"
 )
+
+// deadLetterHeaders lists the headers a dead-letter pass stamps, in the
+// order they're set.
+var deadLetterHeaders = []string{
+	DeadLetterErrorHeader,
+	DeadLetterTopicHeader,
+	DeadLetterPartitionHeader,
+	DeadLetterOffsetHeader,
+}
 
 // Handler processes one received message. Returning an error triggers the
 // Runner's PoisonMessageAction; returning nil commits the offset.
@@ -48,6 +66,14 @@ const (
 	// DeadLetter forwards the original bytes to the dead-letter topic and
 	// commits only once that publish is confirmed messaging.Persisted. A
 	// failed publish leaves the offset uncommitted and stops Run.
+	//
+	// The publish and the commit are still two separate steps: if the
+	// process dies after the dead-letter publish is confirmed but before
+	// the commit lands, a restart re-delivers the same message and
+	// dead-letters it again, duplicating it on the dead-letter topic.
+	// This is the same at-least-once trade-off Handler already lives
+	// with; DLQ consumers are expected to dedupe on EventId (or the
+	// dead-letter source headers) exactly as regular Handlers do.
 	DeadLetter PoisonMessageAction = "dead_letter"
 	// Halt stops Run without committing, so a restart re-delivers the
 	// same message and a human can intervene.
@@ -269,6 +295,13 @@ func (r *Runner[K, V]) deadLetter(ctx context.Context, msg messaging.ReceivedMes
 
 	headers := make(map[string][]byte, len(msg.Headers)+4)
 	for k, v := range msg.Headers {
+		if slices.Contains(deadLetterHeaders, k) {
+			// A prior dead-letter pass already stamped this header (a DLQ
+			// replay); keep its value under a namespaced key instead of
+			// letting this pass overwrite it.
+			headers[DeadLetterPreviousHeaderPrefix+k] = v
+			continue
+		}
 		headers[k] = v
 	}
 	headers[DeadLetterErrorHeader] = []byte(cause.Error())

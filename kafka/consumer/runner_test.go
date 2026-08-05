@@ -216,6 +216,56 @@ func TestRunDeadLetter(t *testing.T) {
 	}
 }
 
+// TestRunDeadLetterPreservesPriorPassHeaders simulates a DLQ replay: a
+// message that already carries dead-letter headers from an earlier pass
+// is dead-lettered again. Both passes' information must survive.
+func TestRunDeadLetterPreservesPriorPassHeaders(t *testing.T) {
+	t.Parallel()
+
+	msg := received(1)
+	msg.Headers[DeadLetterErrorHeader] = []byte("first failure")
+	msg.Headers[DeadLetterTopicHeader] = []byte("orders.v0")
+	msg.Headers[DeadLetterPartitionHeader] = []byte("3")
+	msg.Headers[DeadLetterOffsetHeader] = []byte("42")
+
+	c := &fakeConsumer{script: []consumeResult{{msg: msg}, {msg: received(2)}}}
+	p := &fakeProducer{status: messaging.Persisted}
+
+	err := run(t, c, failOn(1), RunnerConfig{
+		PoisonAction:       DeadLetter,
+		DeadLetterTopic:    dlqTopic,
+		DeadLetterProducer: p,
+	})
+	if err != nil {
+		t.Fatalf("Run = %v, want nil", err)
+	}
+	if len(p.published) != 1 {
+		t.Fatalf("dead-lettered messages = %d, want 1", len(p.published))
+	}
+	got := p.published[0].headers
+
+	if v := string(got[DeadLetterErrorHeader]); !strings.Contains(v, errHandler.Error()) {
+		t.Errorf("%s = %q, want it to mention the new failure %q", DeadLetterErrorHeader, v, errHandler.Error())
+	}
+	if v := string(got[DeadLetterTopicHeader]); v != sourceTopic {
+		t.Errorf("%s = %q, want %q", DeadLetterTopicHeader, v, sourceTopic)
+	}
+
+	prevPrefix := DeadLetterPreviousHeaderPrefix
+	if v := string(got[prevPrefix+DeadLetterErrorHeader]); v != "first failure" {
+		t.Errorf("%s%s = %q, want the first pass's error %q", prevPrefix, DeadLetterErrorHeader, v, "first failure")
+	}
+	if v := string(got[prevPrefix+DeadLetterTopicHeader]); v != "orders.v0" {
+		t.Errorf("%s%s = %q, want %q", prevPrefix, DeadLetterTopicHeader, v, "orders.v0")
+	}
+	if v := string(got[prevPrefix+DeadLetterPartitionHeader]); v != "3" {
+		t.Errorf("%s%s = %q, want %q", prevPrefix, DeadLetterPartitionHeader, v, "3")
+	}
+	if v := string(got[prevPrefix+DeadLetterOffsetHeader]); v != "42" {
+		t.Errorf("%s%s = %q, want %q", prevPrefix, DeadLetterOffsetHeader, v, "42")
+	}
+}
+
 // TestRunDeadLetterFailureLeavesOffsetUncommitted covers the guarantee
 // that an unconfirmed dead-letter publish never advances the offset: the
 // message must be re-delivered rather than lost.
