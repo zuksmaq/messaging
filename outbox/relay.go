@@ -207,13 +207,18 @@ func (r *Relay) initMetrics(m metric.Meter) error {
 }
 
 // Run polls and publishes until ctx is cancelled, at which point it
-// returns nil.
+// returns nil. It returns an error wrapping messaging.ErrInvalidConfig
+// immediately if r was not built with NewRelay.
 //
 // Publish and database failures are logged, counted and retried on the
 // next poll rather than ending the loop: the rows they concern stay
 // staged, so a transient broker or database problem costs latency, not
 // events.
 func (r *Relay) Run(ctx context.Context) error {
+	if err := r.cfg.Validate(); err != nil {
+		return fmt.Errorf("relay was not constructed with NewRelay: %w", err)
+	}
+
 	timer := time.NewTimer(r.cfg.PollInterval)
 	defer timer.Stop()
 

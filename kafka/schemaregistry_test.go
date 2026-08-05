@@ -91,3 +91,15 @@ func TestNewSchemaRegistryRejectsInvalidConfig(t *testing.T) {
 		t.Errorf("NewSchemaRegistry error = %v, want ErrInvalidConfig", err)
 	}
 }
+
+// TestZeroValueSchemaRegistryCloseIsSafe covers a &SchemaRegistry{} built
+// by a DI container bypassing NewSchemaRegistry: it has no client, so
+// Close must no-op rather than dereference a nil interface.
+func TestZeroValueSchemaRegistryCloseIsSafe(t *testing.T) {
+	t.Parallel()
+
+	sr := &SchemaRegistry{}
+	if err := sr.Close(); err != nil {
+		t.Errorf("Close on a zero-value registry = %v, want nil", err)
+	}
+}

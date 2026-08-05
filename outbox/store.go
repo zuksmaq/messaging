@@ -89,7 +89,14 @@ func New(d Dialect) (*Outbox, error) {
 // Enqueue stages an event on tx, the caller's own already-open
 // transaction: the row becomes visible to a Relay only once the caller
 // commits, and disappears with a rollback.
+//
+// It returns an error wrapping messaging.ErrInvalidConfig if o was not
+// built with New, or if headers keys messaging.EventIDHeader, which the
+// Relay reserves for the row's own id.
 func (o *Outbox) Enqueue(ctx context.Context, tx *sql.Tx, topic string, key, value []byte, headers map[string][]byte) error {
+	if o.dialect == nil {
+		return fmt.Errorf("%w: outbox was not constructed with New", messaging.ErrInvalidConfig)
+	}
 	if tx == nil {
 		return fmt.Errorf("%w: a transaction is required", messaging.ErrInvalidConfig)
 	}
@@ -98,6 +105,9 @@ func (o *Outbox) Enqueue(ctx context.Context, tx *sql.Tx, topic string, key, val
 	}
 	if n := utf8.RuneCountInString(topic); n > MaxTopicLength {
 		return fmt.Errorf("%w: topic %q is %d characters, exceeds the %d-character limit", messaging.ErrInvalidConfig, topic, n, MaxTopicLength)
+	}
+	if _, ok := headers[messaging.EventIDHeader]; ok {
+		return fmt.Errorf("%w: header %q is reserved for the outbox's event id", messaging.ErrInvalidConfig, messaging.EventIDHeader)
 	}
 
 	encoded, err := encodeHeaders(headers)
