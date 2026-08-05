@@ -97,6 +97,15 @@ func (c RelayConfig) withDefaults() RelayConfig {
 // It is exposed as a blocking Run(ctx) error rather than a
 // framework-managed service type; the caller starts it with
 // go r.Run(ctx) or awaits it directly.
+//
+// Per-key publish ordering is guaranteed only when a single Relay
+// instance runs against a given table. The dialect's claim SQL uses
+// SKIP LOCKED / READPAST so a second instance claims rows the first
+// has not locked rather than blocking on them: that lets two instances
+// drain a table concurrently, but nothing stops one from claiming and
+// publishing a same-key row the other left behind for a later batch.
+// Running multiple instances against the same table is a deliberate
+// throughput-for-ordering trade-off, not a bug.
 type Relay struct {
 	cfg    RelayConfig
 	logger *slog.Logger
