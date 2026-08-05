@@ -35,11 +35,12 @@ type Consumer[K, V any] struct {
 	logger *slog.Logger
 
 	// pollMu guards against Close tearing down the client while a
-	// Consume call is still polling it: Consume holds a read lock only
-	// for the duration of one poll, and Close takes the write lock
-	// (waiting out any in-flight poll) before touching the client, so
-	// the two never run concurrently against the same handle.
-	pollMu sync.RWMutex
+	// Consume call is still polling it: Consume holds the lock only for
+	// the duration of one poll, and Close takes it (waiting out any
+	// in-flight poll) before touching the client, so the two never run
+	// concurrently against the same handle. A plain Mutex is enough —
+	// Consume is a single-caller blocking loop, not a concurrent reader.
+	pollMu sync.Mutex
 	closed bool
 
 	keyDe   kafka.Deserializer[K]
@@ -154,13 +155,13 @@ func (c *Consumer[K, V]) Consume(ctx context.Context) (messaging.ReceivedMessage
 	}
 }
 
-// poll runs one poll of the underlying client, holding pollMu for read so
-// a concurrent Close waits for it to finish before tearing the client
+// poll runs one poll of the underlying client, holding pollMu so a
+// concurrent Close waits for it to finish before tearing the client
 // down. It reports an error instead of polling once the consumer is
 // closed, rather than touching an already-destroyed client handle.
 func (c *Consumer[K, V]) poll() (ckafka.Event, error) {
-	c.pollMu.RLock()
-	defer c.pollMu.RUnlock()
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
 
 	if c.closed {
 		return nil, fmt.Errorf("%w: consumer is closed", messaging.ErrBroker)
@@ -247,11 +248,17 @@ func (c *Consumer[K, V]) ReadyCheck(ctx context.Context) error {
 // schema registry fail to close, both errors are reported via
 // errors.Join rather than only one silently winning.
 func (c *Consumer[K, V]) Close() error {
+	c.markClosed()
+	return joinCloseErrors(c.client.Close(), c.registry.Close())
+}
+
+// markClosed waits out any poll in flight, then marks the consumer
+// closed. Split out from Close so the wait-for-in-flight-poll behavior
+// is testable without a real client.
+func (c *Consumer[K, V]) markClosed() {
 	c.pollMu.Lock()
 	c.closed = true
 	c.pollMu.Unlock()
-
-	return joinCloseErrors(c.client.Close(), c.registry.Close())
 }
 
 // joinCloseErrors combines Close's two independent failure sources so

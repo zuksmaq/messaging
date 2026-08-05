@@ -75,8 +75,11 @@ func TestJoinCloseErrors(t *testing.T) {
 }
 
 // TestCloseWaitsForInFlightConsume races Close against a concurrent
-// Consume loop: run under -race, this proves pollMu actually serializes
-// access to the client rather than merely happening not to crash.
+// Consume loop against a real (unreachable) client, run under -race, as
+// an end-to-end sanity check. Because the underlying Poll call against
+// an unreachable broker returns quickly, this doesn't reliably land
+// Close exactly mid-poll — TestMarkClosedWaitsForInFlightPoll below
+// proves the actual lock invariant deterministically.
 func TestCloseWaitsForInFlightConsume(t *testing.T) {
 	t.Parallel()
 
@@ -123,6 +126,42 @@ func TestCloseWaitsForInFlightConsume(t *testing.T) {
 
 	cancel()
 	wg.Wait()
+}
+
+// TestMarkClosedWaitsForInFlightPoll deterministically proves the lock
+// invariant Close relies on: simulating an in-flight poll by holding
+// pollMu directly (no real client/timing involved), markClosed must
+// block until that simulated poll releases the lock.
+func TestMarkClosedWaitsForInFlightPoll(t *testing.T) {
+	t.Parallel()
+
+	var c Consumer[string, []byte]
+	c.pollMu.Lock() // simulates poll()'s in-flight hold
+
+	done := make(chan struct{})
+	go func() {
+		c.markClosed()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("markClosed() returned while the simulated in-flight poll still held the lock")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: still blocked.
+	}
+
+	c.pollMu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("markClosed() did not return after the simulated poll released the lock")
+	}
+
+	if !c.closed {
+		t.Error("closed = false after markClosed(), want true")
+	}
 }
 
 // TestConsumeAfterCloseReturnsPromptly asserts Consume never touches the
