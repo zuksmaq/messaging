@@ -10,20 +10,56 @@ import (
 	"testing"
 	"time"
 
-	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/zuksmaq/messaging"
 	"github.com/zuksmaq/messaging/kafka"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
+// unreachableProducer builds a Producer pointed at a port with nothing
+// listening, so anything produced stays queued in librdkafka and is
+// never acknowledged. No broker is required.
+func unreachableProducer(t *testing.T, opts ...kafka.Option) *Producer[string, []byte] {
+	t.Helper()
+
+	p, err := New[string, []byte](Config{
+		BootstrapServers: "127.0.0.1:1",
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatBytes,
+		FlushTimeout:     50 * time.Millisecond,
+		ProduceTimeout:   50 * time.Millisecond,
+	}, opts...)
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+	return p
+}
+
+// produceUnacknowledged sends n messages through the public Produce
+// API. Each call times out waiting for an acknowledgement that will
+// never arrive, leaving the message queued in the client — the state
+// Close has to account for. Producing concurrently keeps the test's
+// runtime at one ProduceTimeout rather than n of them.
+func produceUnacknowledged(t *testing.T, p *Producer[string, []byte], n int) {
+	t.Helper()
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := p.Produce(context.Background(), "unreachable", "k", []byte("payload"), nil)
+			if err == nil {
+				t.Errorf("Produce %d = nil, want a timeout error against an unreachable broker", i)
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
 // TestCloseReportsUnflushedMessages covers shutdown when buffered
 // messages cannot be acknowledged inside the flush timeout: the
 // residual must be logged and counted, never silently dropped, and
 // Close must not hang.
-//
-// The producer points at a port with nothing listening, so messages
-// stay queued in librdkafka for the whole (short) flush window. No
-// broker is required.
 func TestCloseReportsUnflushedMessages(t *testing.T) {
 	t.Parallel()
 
@@ -33,31 +69,11 @@ func TestCloseReportsUnflushedMessages(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	reader, meter := testMeter()
 
-	p, err := New[string, []byte](Config{
-		BootstrapServers: "127.0.0.1:1",
-		KeyFormat:        kafka.FormatString,
-		ValueFormat:      kafka.FormatBytes,
-		FlushTimeout:     50 * time.Millisecond,
-	}, kafka.WithLogger(logger), kafka.WithMetrics(meter))
-	if err != nil {
-		t.Fatalf("New = %v", err)
-	}
-
-	// Enqueue on the underlying client so the messages buffer without
-	// this test blocking on acknowledgements that will never arrive.
-	topic := "unreachable"
-	for range queued {
-		msg := &ckafka.Message{
-			TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: ckafka.PartitionAny},
-			Value:          []byte("payload"),
-		}
-		if err := p.client.Produce(msg, nil); err != nil {
-			t.Fatalf("enqueuing message: %v", err)
-		}
-	}
+	p := unreachableProducer(t, kafka.WithLogger(logger), kafka.WithMetrics(meter))
+	produceUnacknowledged(t, p, queued)
 
 	start := time.Now()
-	err = p.Close(context.Background())
+	err := p.Close(context.Background())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -91,26 +107,8 @@ func TestCloseTwiceIsSafeNoOp(t *testing.T) {
 	const queued = 3
 
 	reader, meter := testMeter()
-	p, err := New[string, []byte](Config{
-		BootstrapServers: "127.0.0.1:1",
-		KeyFormat:        kafka.FormatString,
-		ValueFormat:      kafka.FormatBytes,
-		FlushTimeout:     50 * time.Millisecond,
-	}, kafka.WithMetrics(meter))
-	if err != nil {
-		t.Fatalf("New = %v", err)
-	}
-
-	topic := "unreachable"
-	for range queued {
-		msg := &ckafka.Message{
-			TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: ckafka.PartitionAny},
-			Value:          []byte("payload"),
-		}
-		if err := p.client.Produce(msg, nil); err != nil {
-			t.Fatalf("enqueuing message: %v", err)
-		}
-	}
+	p := unreachableProducer(t, kafka.WithMetrics(meter))
+	produceUnacknowledged(t, p, queued)
 
 	firstErr := p.Close(context.Background())
 	if firstErr == nil {
@@ -144,26 +142,8 @@ func TestCloseConcurrentIsSafeNoOp(t *testing.T) {
 	const callers = 10
 
 	reader, meter := testMeter()
-	p, err := New[string, []byte](Config{
-		BootstrapServers: "127.0.0.1:1",
-		KeyFormat:        kafka.FormatString,
-		ValueFormat:      kafka.FormatBytes,
-		FlushTimeout:     50 * time.Millisecond,
-	}, kafka.WithMetrics(meter))
-	if err != nil {
-		t.Fatalf("New = %v", err)
-	}
-
-	topic := "unreachable"
-	for range queued {
-		msg := &ckafka.Message{
-			TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: ckafka.PartitionAny},
-			Value:          []byte("payload"),
-		}
-		if err := p.client.Produce(msg, nil); err != nil {
-			t.Fatalf("enqueuing message: %v", err)
-		}
-	}
+	p := unreachableProducer(t, kafka.WithMetrics(meter))
+	produceUnacknowledged(t, p, queued)
 
 	var wg sync.WaitGroup
 	errs := make([]error, callers)

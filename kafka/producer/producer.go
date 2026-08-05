@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -32,6 +33,14 @@ type Producer[K, V any] struct {
 
 	// drained closes once the background events reader has exited.
 	drained chan struct{}
+
+	// inFlight counts messages handed to the client that Produce has
+	// not yet seen acknowledged. Close reports this rather than the
+	// underlying client's Flush return value: Flush counts outstanding
+	// *events* — broker error events and statistics share the queue it
+	// measures — so it over-reports whenever an error event happens to
+	// be pending, which is precisely what a broker outage produces.
+	inFlight atomic.Int64
 
 	// closeOnce guards against re-entering the underlying client's
 	// flush/close on a second Close call; closeErr caches the result
@@ -182,7 +191,9 @@ func (p *Producer[K, V]) Produce(ctx context.Context, topic string, key K, value
 	// observing each other's acknowledgements.
 	deliveryChan := make(chan ckafka.Event, 1)
 	start := time.Now()
+	p.inFlight.Add(1)
 	if err := p.client.Produce(msg, deliveryChan); err != nil {
+		p.inFlight.Add(-1)
 		p.failed.Add(ctx, 1, metric.WithAttributes(attribute.String("topic", topic)))
 		return messaging.ProducedMessage{Topic: topic, Status: statusFor(err)},
 			fmt.Errorf("%w: enqueuing message for topic %q: %v", messaging.ErrBroker, topic, err)
@@ -190,10 +201,13 @@ func (p *Producer[K, V]) Produce(ctx context.Context, topic string, key K, value
 
 	select {
 	case ev := <-deliveryChan:
+		p.inFlight.Add(-1)
 		return p.report(ctx, topic, ev, start)
 	case <-ctx.Done():
 		// The message stays queued in librdkafka and may still be
-		// delivered, so the caller must not assume it was lost.
+		// delivered, so the caller must not assume it was lost — and
+		// it stays counted in inFlight, since nothing will read the
+		// acknowledgement off deliveryChan now.
 		p.failed.Add(context.WithoutCancel(ctx), 1, metric.WithAttributes(attribute.String("topic", topic)))
 		return messaging.ProducedMessage{Topic: topic, Status: messaging.PossiblyPersisted},
 			fmt.Errorf("%w: awaiting acknowledgement for topic %q: %v", messaging.ErrBroker, topic, ctx.Err())
@@ -261,7 +275,8 @@ func (p *Producer[K, V]) Close(ctx context.Context) error {
 func (p *Producer[K, V]) closeClient(ctx context.Context) error {
 	timeout := kafka.ClampTimeout(ctx, p.cfg.FlushTimeout)
 
-	remaining := p.client.Flush(int(timeout.Milliseconds()))
+	p.client.Flush(int(timeout.Milliseconds()))
+	remaining := int(p.inFlight.Load())
 	p.client.Close()
 	<-p.drained
 
