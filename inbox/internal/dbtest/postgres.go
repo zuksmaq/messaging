@@ -20,6 +20,8 @@ func postgresBackend() Backend {
 		Name:            "postgres",
 		Dialect:         postgres.Dialect{},
 		Start:           startPostgres,
+		StartFresh:      startPostgresFresh,
+		CreateTableSQL:  postgres.CreateTableSQL,
 		Table:           postgres.Table,
 		CreateOrdersSQL: `CREATE TABLE orders (id TEXT PRIMARY KEY)`,
 		InsertOrderSQL:  `INSERT INTO orders (id) VALUES ($1)`,
@@ -29,6 +31,18 @@ func postgresBackend() Backend {
 // startPostgres starts a Postgres container for the duration of the test,
 // creates the inbox table in it, and returns a connection pool.
 func startPostgres(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db := startPostgresFresh(t)
+	if _, err := db.Exec(postgres.CreateTableSQL); err != nil {
+		t.Fatalf("creating inbox table: %v", err)
+	}
+	return db
+}
+
+// startPostgresFresh starts a Postgres container for the duration of the
+// test and returns a pool against it with no inbox table yet.
+func startPostgresFresh(t *testing.T) *sql.DB {
 	t.Helper()
 
 	ctx := context.Background()
@@ -51,5 +65,5 @@ func startPostgres(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("resolving connection string: %v", err)
 	}
-	return open(t, "pgx", dsn, postgres.CreateTableSQL)
+	return open(t, "pgx", dsn)
 }

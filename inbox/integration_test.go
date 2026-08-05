@@ -12,6 +12,7 @@ package inbox_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -377,6 +378,87 @@ func TestManyConcurrentDeliveriesNeverCollide(t *testing.T) {
 			t.Error("HasProcessed after the race = false, want true")
 		}
 	})
+}
+
+// TestMarkProcessedForDistinctIDsDoesNotSerialize pins the SQL Server
+// dialect fix: recording distinct event ids that all land in the same
+// empty key-range gap of a fresh/sparse table must not make one wait for
+// another. None of the transactions here ever commits, so a dialect that
+// still locked the gap would hang every call but the first for the rest
+// of the test rather than eventually letting them through.
+func TestMarkProcessedForDistinctIDsDoesNotSerialize(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		ctx := context.Background()
+		in := newInbox(t, b)
+
+		const spread = 8
+		txs := make([]*sql.Tx, spread)
+		for i := range txs {
+			txs[i] = begin(t, db)
+		}
+		defer func() {
+			for _, tx := range txs {
+				_ = tx.Rollback()
+			}
+		}()
+
+		done := make(chan error, spread)
+		for i, tx := range txs {
+			go func(i int, tx *sql.Tx) {
+				_, err := in.MarkProcessed(ctx, tx, fmt.Sprintf("evt-%d", i))
+				done <- err
+			}(i, tx)
+		}
+
+		for i := 0; i < spread; i++ {
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("MarkProcessed: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("only %d/%d MarkProcessed calls returned within 5s: distinct ids are blocking on each other", i, spread)
+			}
+		}
+	})
+}
+
+// TestCreateTableSQLToleratesConcurrentRuns pins the SQL Server dialect
+// fix: two connections racing CreateTableSQL against a database where the
+// table does not exist yet must both succeed, as two service replicas
+// provisioning schema at startup would. SQL Server only: Postgres'
+// CREATE TABLE IF NOT EXISTS has its own well-documented race under real
+// concurrency, and fixing that is outside this ticket.
+func TestCreateTableSQLToleratesConcurrentRuns(t *testing.T) {
+	for _, b := range dbtest.Backends() {
+		if b.Name != "sqlserver" {
+			continue
+		}
+		t.Run(b.Name, func(t *testing.T) {
+			db := b.StartFresh(t)
+
+			const runs = 2
+			errs := make([]error, runs)
+			var wg sync.WaitGroup
+			for i := range errs {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					_, errs[i] = db.ExecContext(context.Background(), b.CreateTableSQL)
+				}(i)
+			}
+			wg.Wait()
+
+			for i, err := range errs {
+				if err != nil {
+					t.Errorf("CreateTableSQL run %d: %v", i, err)
+				}
+			}
+			if n := b.Count(t, db); n != 0 {
+				t.Errorf("inbox rows after creating the table = %d, want 0", n)
+			}
+		})
+	}
 }
 
 // TestDedupKeyIsTheTransportAgnosticEventID proves the key is the same

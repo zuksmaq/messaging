@@ -415,6 +415,52 @@ func TestConcurrentRelaysClaimDisjointRows(t *testing.T) {
 	})
 }
 
+// TestConcurrentRelaysCanInterleaveSameKeyRows pins the documented
+// throughput-for-ordering trade-off: per-key publish ordering only holds
+// when a single relay runs against the table. Relay A claims the older
+// same-key row and blocks mid-publish; relay B's claim skips A's locked
+// row — the same SKIP LOCKED / READPAST behavior that lets disjoint
+// claims proceed concurrently — and publishes the newer row first. If a
+// future change makes cross-relay ordering hold, this test should fail
+// and force that change to be deliberate rather than a silent
+// regression either way.
+func TestConcurrentRelaysCanInterleaveSameKeyRows(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		enqueueAll(t, b, db, []event{
+			{topic: "orders", key: "same-key", value: "older"},
+			{topic: "orders", key: "same-key", value: "newer"},
+		})
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		pA := &fakeProducer{beforeProduce: func() {
+			close(entered)
+			<-release
+		}}
+		startRelay(t, b, db, pA, 1, 0)
+
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("relay A did not claim the older row within 5s")
+		}
+
+		pB := &fakeProducer{}
+		startRelay(t, b, db, pB, 1, 0)
+		dbtest.WaitFor(t, "relay B to publish the newer row", func() bool { return len(pB.values()) == 1 })
+
+		close(release)
+		dbtest.WaitFor(t, "the outbox to drain", func() bool { return b.Count(t, db) == 0 })
+
+		if got := pB.values(); !slices.Equal(got, []string{"newer"}) {
+			t.Fatalf("relay B published = %v, want [newer]", got)
+		}
+		if got := pA.values(); !slices.Equal(got, []string{"older"}) {
+			t.Fatalf("relay A published = %v, want [older]", got)
+		}
+	})
+}
+
 // TestRunReturnsWhenContextIsCancelled covers shutdown: Run is a
 // blocking loop, so cancelling its context must end it promptly and
 // without error.
