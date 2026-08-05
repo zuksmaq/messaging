@@ -26,8 +26,8 @@ split into `producer`/`consumer` is ADR 0008.
 The whole repo versions as one module, so there is a single tag per
 release and no cross-package version skew (ADR 0009).
 
-See `messaging-handoff.md` for the full design record: decisions,
-invariants, open items, and rejected alternatives.
+See `CONTEXT.md` and `docs/adr/` for the design record: decisions,
+invariants, and rejected alternatives.
 
 ## Development
 
