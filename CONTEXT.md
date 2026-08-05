@@ -15,8 +15,11 @@ and their rationale.
 | integration | `github.com/zuksmaq/messaging/integration` | all four |
 
 `outbox/postgres` and `outbox/sqlserver` (and the `inbox` equivalents)
-hold dialect-specific SQL only — the core `outbox`/`inbox` packages are
-database-agnostic.
+hold dialect-specific SQL, plus the occasional bit of driver-specific
+logic a database's SQL can't express on its own (e.g. `inbox/sqlserver`
+recognising its driver's duplicate-key error, since SQL Server has no
+`ON CONFLICT DO NOTHING`) — the core `outbox`/`inbox` packages stay
+database-agnostic and never import a driver.
 
 ## Glossary
 

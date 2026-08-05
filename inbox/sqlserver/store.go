@@ -13,13 +13,13 @@ import (
 // Table is the inbox table every statement here targets.
 const Table = "messaging_inbox"
 
-// duplicateKeyErrors are the SQL Server error numbers InsertSQL fails
-// with when event_id already has a row: 2627 for the primary key
-// constraint this table declares, 2601 if a caller's own migration ever
-// added a unique index instead.
+// SQL Server error numbers InsertSQL fails with when event_id already
+// has a row: primaryKeyViolation for the primary key constraint this
+// table declares, duplicateKeyRow if a caller's own migration ever added
+// a unique index instead.
 const (
-	errPrimaryKeyViolation = 2627
-	errDuplicateKeyRow     = 2601
+	primaryKeyViolation = 2627
+	duplicateKeyRow     = 2601
 )
 
 // CreateTableSQL creates the inbox table. It is exported so callers can
@@ -91,7 +91,7 @@ func (Dialect) IsDuplicateKeyError(err error) bool {
 		return false
 	}
 	switch sqlErr.Number {
-	case errPrimaryKeyViolation, errDuplicateKeyRow:
+	case primaryKeyViolation, duplicateKeyRow:
 		return true
 	default:
 		return false
