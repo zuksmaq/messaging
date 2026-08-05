@@ -9,12 +9,17 @@ indefinitely.
 
 **Blocked by:** 01 — Shared context-deadline timeout clamp helper.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Commit` bounds the underlying commit call to whatever remains
+- [x] `Commit` bounds the underlying commit call to whatever remains
       on `ctx`'s deadline, using the shared clamp helper.
-- [ ] `Commit` called with an already-cancelled or expired context
+- [x] `Commit` called with an already-cancelled or expired context
       returns `ctx.Err()` promptly instead of attempting the broker
       call.
-- [ ] A test exercises `Commit` with a pre-cancelled/expired context
+- [x] A test exercises `Commit` with a pre-cancelled/expired context
       and asserts a prompt return.
+
+## Comments
+
+Landed in #20. The status field and checklist were not
+updated when the work merged; this catches the ticket up to the code.

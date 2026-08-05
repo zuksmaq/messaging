@@ -12,20 +12,25 @@ startup) must not fail each other outright.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Concurrent `MarkProcessed` calls for different event ids that
+- [x] Concurrent `MarkProcessed` calls for different event ids that
       fall in the same empty key-range gap no longer block on each
       other; only calls for the *same* event id serialize.
-- [ ] Concurrent `MarkProcessed` calls for the *same* event id still
+- [x] Concurrent `MarkProcessed` calls for the *same* event id still
       behave correctly (exactly one succeeds in recording it; no
       duplicate rows).
-- [ ] Two concurrent `CreateTableSQL` runs against a database where
+- [x] Two concurrent `CreateTableSQL` runs against a database where
       the table does not yet exist both complete without either
       failing outright.
-- [ ] A test runs `MarkProcessed` concurrently for a spread of
+- [x] A test runs `MarkProcessed` concurrently for a spread of
       distinct event ids on a fresh/sparse table and asserts none of
       the calls block on each other beyond what's needed for their
       own row.
-- [ ] A test runs `CreateTableSQL` concurrently from two connections
+- [x] A test runs `CreateTableSQL` concurrently from two connections
       against a fresh database and asserts both succeed.
+
+## Comments
+
+Landed in #27. The status field and checklist were not
+updated when the work merged; this catches the ticket up to the code.

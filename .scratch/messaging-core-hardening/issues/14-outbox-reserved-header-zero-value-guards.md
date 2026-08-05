@@ -12,16 +12,21 @@ instead of panicking with a nil-pointer/interface dereference.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Enqueue` called with a caller-supplied header keyed `EventId`
+- [x] `Enqueue` called with a caller-supplied header keyed `EventId`
       returns a clear, documented error instead of silently allowing
       the value to be overwritten later.
-- [ ] A zero-value `Outbox`/`Relay`'s exported entry points (`Run`,
+- [x] A zero-value `Outbox`/`Relay`'s exported entry points (`Run`,
       `Enqueue`) return a documented configuration error instead of
       panicking.
-- [ ] A zero-value `SchemaRegistry`'s `Close` returns a documented
+- [x] A zero-value `SchemaRegistry`'s `Close` returns a documented
       configuration error (or a safe no-op) instead of panicking.
-- [ ] Tests cover: `Enqueue` rejecting a reserved header; a
+- [x] Tests cover: `Enqueue` rejecting a reserved header; a
       zero-value `Outbox`/`Relay` failing safely; a zero-value
       `SchemaRegistry` failing safely.
+
+## Comments
+
+Landed in #30. The status field and checklist were not
+updated when the work merged; this catches the ticket up to the code.

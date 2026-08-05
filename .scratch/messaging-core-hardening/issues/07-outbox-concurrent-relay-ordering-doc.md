@@ -11,13 +11,18 @@ deliberate.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Relay`'s doc comment states the single-instance-for-ordering
+- [x] `Relay`'s doc comment states the single-instance-for-ordering
       requirement explicitly.
-- [ ] `CONTEXT.md`'s `Outbox`/`Relay` glossary entry states the same
+- [x] `CONTEXT.md`'s `Outbox`/`Relay` glossary entry states the same
       trade-off.
-- [ ] A test pins that two concurrent relay instances against the
+- [x] A test pins that two concurrent relay instances against the
       same table can interleave same-key rows out of order today, so
       a future change to this behavior is a deliberate, visible test
       change rather than a silent regression either way.
+
+## Comments
+
+Landed in #25. The status field and checklist were not
+updated when the work merged; this catches the ticket up to the code.
