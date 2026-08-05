@@ -242,15 +242,7 @@ func statusFor(err error) messaging.DeliveryStatus {
 // sooner); any residual un-acknowledged messages are logged and
 // counted rather than silently dropped.
 func (p *Producer[K, V]) Close(ctx context.Context) error {
-	timeout := p.cfg.FlushTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
-	}
-	if timeout < 0 {
-		timeout = 0
-	}
+	timeout := kafka.ClampTimeout(ctx, p.cfg.FlushTimeout)
 
 	remaining := p.client.Flush(int(timeout.Milliseconds()))
 	p.client.Close()
@@ -272,12 +264,7 @@ func (p *Producer[K, V]) Close(ctx context.Context) error {
 
 // ReadyCheck reports whether the producer can reach the cluster.
 func (p *Producer[K, V]) ReadyCheck(ctx context.Context) error {
-	timeout := p.cfg.ProduceTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
-	}
+	timeout := kafka.ClampTimeout(ctx, p.cfg.ProduceTimeout)
 	if timeout <= 0 {
 		return fmt.Errorf("%w: no time left for readiness check", messaging.ErrBroker)
 	}

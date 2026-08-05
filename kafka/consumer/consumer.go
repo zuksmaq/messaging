@@ -199,12 +199,7 @@ func (c *Consumer[K, V]) Commit(_ context.Context, msg messaging.ReceivedMessage
 
 // ReadyCheck reports whether the consumer can reach the cluster.
 func (c *Consumer[K, V]) ReadyCheck(ctx context.Context) error {
-	timeout := c.cfg.ReadyCheckTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining < timeout {
-			timeout = remaining
-		}
-	}
+	timeout := kafka.ClampTimeout(ctx, c.cfg.ReadyCheckTimeout)
 	if timeout <= 0 {
 		return fmt.Errorf("%w: no time left for readiness check", messaging.ErrBroker)
 	}

@@ -12,13 +12,26 @@ of this ticket alone.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] One helper computes a clamped timeout from a `context.Context`
+- [x] One helper computes a clamped timeout from a `context.Context`
       and a base timeout, treating an already-done context as a zero
       timeout.
-- [ ] `Producer.Close`, `Producer.ReadyCheck`, and
+- [x] `Producer.Close`, `Producer.ReadyCheck`, and
       `Consumer.ReadyCheck` all call the shared helper instead of
       their own inline clamping logic.
-- [ ] All existing tests for these three methods continue to pass
+- [x] All existing tests for these three methods continue to pass
       unmodified — this ticket changes no observable behavior.
+
+## Comments
+
+Implemented as `kafka.ClampTimeout(ctx, base)` in `kafka/timeout.go`,
+unit-tested in `kafka/timeout_test.go` (no deadline, deadline shorter/
+longer than base, already-cancelled context, already-expired
+deadline). `Producer.Close`, `Producer.ReadyCheck`, and
+`Consumer.ReadyCheck` now call it in place of their inline clamping.
+Verified with `GOWORK=off go build ./... && GOWORK=off go vet ./...`
+and `GOWORK=off go test ./...` (unit) plus `-tags=integration` runs of
+`TestCloseReportsUnflushedMessages`, `TestReadyCheckAgainstRealBroker`,
+and `TestConsumerReadyCheck` against real broker containers — all
+green, unmodified.
