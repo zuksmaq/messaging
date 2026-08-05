@@ -17,10 +17,12 @@ const sqlServerImage = "mcr.microsoft.com/mssql/server:2022-latest"
 
 func sqlServerBackend() Backend {
 	return Backend{
-		Name:    "sqlserver",
-		Dialect: sqlserver.Dialect{},
-		Start:   startSQLServer,
-		Table:   sqlserver.Table,
+		Name:           "sqlserver",
+		Dialect:        sqlserver.Dialect{},
+		Start:          startSQLServer,
+		StartFresh:     startSQLServerFresh,
+		CreateTableSQL: sqlserver.CreateTableSQL,
+		Table:          sqlserver.Table,
 		// SQL Server has no unbounded TEXT key type, and its placeholders
 		// are ordinal rather than dollar-numbered.
 		CreateOrdersSQL: `CREATE TABLE orders (id NVARCHAR(100) PRIMARY KEY)`,
@@ -31,6 +33,18 @@ func sqlServerBackend() Backend {
 // startSQLServer starts a SQL Server container for the duration of the
 // test, creates the inbox table in it, and returns a connection pool.
 func startSQLServer(t *testing.T) *sql.DB {
+	t.Helper()
+
+	db := startSQLServerFresh(t)
+	if _, err := db.Exec(sqlserver.CreateTableSQL); err != nil {
+		t.Fatalf("creating inbox table: %v", err)
+	}
+	return db
+}
+
+// startSQLServerFresh starts a SQL Server container for the duration of
+// the test and returns a pool against it with no inbox table yet.
+func startSQLServerFresh(t *testing.T) *sql.DB {
 	t.Helper()
 
 	ctx := context.Background()
@@ -48,5 +62,5 @@ func startSQLServer(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("resolving connection string: %v", err)
 	}
-	return open(t, "sqlserver", dsn, sqlserver.CreateTableSQL)
+	return open(t, "sqlserver", dsn)
 }
