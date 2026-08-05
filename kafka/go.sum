@@ -265,8 +265,8 @@ github.com/xiatechs/jsonata-go v1.8.5 h1:m1NaokPKD6LPaTPRl674EQz5mpkJvM3ymjdReDE
 github.com/xiatechs/jsonata-go v1.8.5/go.mod h1:yGEvviiftcdVfhSRhRSpgyTel89T58f+690iB0fp2Vk=
 github.com/yusufpapurcu/wmi v1.2.4 h1:zFUKzehAFReQwLys1b/iSMl+JQGSCSjtVqQn9bBrPo0=
 github.com/yusufpapurcu/wmi v1.2.4/go.mod h1:SBZ9tNy3G9/m5Oi98Zks0QjeHVDvuK0qfxQmPyzfmi0=
-github.com/zuksmaq/messaging v0.1.0 h1:nwYbu02H83L4ZHdcBmDZLAAgN2cuPgGhjYXPAoqE3dM=
-github.com/zuksmaq/messaging v0.1.0/go.mod h1:lc++ERLHNmDPjdd2mtCSKoe3RHY4Il3jjcok8mCJtE8=
+github.com/zuksmaq/messaging v0.1.1 h1:G5eIQlSJ0jACR7uumEL5k8y+Ev6HuVEZYntXx+1VV1s=
+github.com/zuksmaq/messaging v0.1.1/go.mod h1:lc++ERLHNmDPjdd2mtCSKoe3RHY4Il3jjcok8mCJtE8=
 go.opencensus.io v0.24.0 h1:y73uSU6J157QMP2kn2r30vwW1A2W2WFwSCGnAVxeaD0=
 go.opencensus.io v0.24.0/go.mod h1:vNK8G9p7aAivkbmorf4v+7Hgx+Zs0yY+0fOtgBfjQKo=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=
