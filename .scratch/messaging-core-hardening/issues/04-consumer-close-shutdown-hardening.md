@@ -11,16 +11,57 @@ the other.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Close()` called while a `Consume`/poll call is in flight waits
+- [x] `Close()` called while a `Consume`/poll call is in flight waits
       for that call to return before proceeding, instead of tearing
       down the client concurrently with it.
-- [ ] `Close()` calling both a failing client close and a failing
+- [x] `Close()` calling both a failing client close and a failing
       schema-registry close returns an error that surfaces both
       failures (e.g. via `errors.Join`), not just one.
-- [ ] A test exercises `Close()` racing a concurrent `Consume`/`Run`
+- [x] A test exercises `Close()` racing a concurrent `Consume`/`Run`
       call (e.g. under the race detector) and asserts no data race
       and no crash.
-- [ ] A test asserts that a `Close()` call with both underlying
+- [x] A test asserts that a `Close()` call with both underlying
       failures reports both errors.
+
+## Comments
+
+Added `pollMu sync.Mutex` and `closed bool` to `Consumer`. Each
+`Consume` iteration now calls a new `poll()` method that holds
+`pollMu` only for the duration of one `client.Poll()` call and checks
+`closed` first; `Close()` marks the consumer closed via a small
+extracted `markClosed()` (which takes `pollMu` before setting the
+flag) before touching the client, which both waits out any in-flight
+poll and stops the next one from starting once the client handle is
+torn down (`kafka/consumer/consumer.go`).
+
+`Close()`'s two failure sources are combined via a small extracted
+`joinCloseErrors(clientErr, registryErr) error` helper using
+`errors.Join`, tested directly with synthetic errors
+(`TestJoinCloseErrors`) since forcing the real `confluent-kafka-go`
+client and a real schema registry to fail simultaneously isn't
+practical to do deterministically.
+
+Code review caught two issues in the first pass, both fixed:
+- `pollMu` was originally a `sync.RWMutex`, which only pays off with
+  concurrent readers — `Consume` is a single-caller blocking loop, so
+  a plain `Mutex` says the same thing with less surface area.
+- The original concurrency test (`TestCloseWaitsForInFlightConsume`)
+  raced a real `Consume` loop against `Close()` behind a
+  `time.Sleep(10ms)`, which only reliably lands `Close` mid-poll a
+  fraction of the time (an unreachable-broker `Poll` call returns
+  almost immediately, so there's little window to hit). Added
+  `TestMarkClosedWaitsForInFlightPoll`, which holds `pollMu` directly
+  to simulate an in-flight poll and asserts `markClosed()` blocks
+  until it's released — a deterministic proof of the actual lock
+  invariant, independent of real client timing. The original test is
+  kept as a supplementary end-to-end sanity check under `-race`.
+`TestConsumeAfterCloseReturnsPromptly` asserts a `Consume` call after
+`Close()` returns promptly with an error instead of touching the
+destroyed client.
+
+Verified with `GOWORK=off go build ./... && GOWORK=off go vet ./...`,
+`GOWORK=off go test -race ./...` (all packages green, no races), and
+`-tags=integration go test ./consumer/... -run TestConsumerReadyCheck`
+against a real broker container.

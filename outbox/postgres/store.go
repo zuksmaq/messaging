@@ -9,12 +9,14 @@ const Table = "messaging_outbox"
 // CreateTableSQL creates the outbox table. It is exported so callers can
 // run it from their own migrations; this package never runs it.
 const CreateTableSQL = `CREATE TABLE IF NOT EXISTS ` + Table + ` (
-	id         BIGSERIAL PRIMARY KEY,
-	topic      TEXT NOT NULL,
-	"key"      BYTEA,
-	"value"    BYTEA,
-	headers    JSONB,
-	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	id             BIGSERIAL PRIMARY KEY,
+	topic          TEXT NOT NULL,
+	"key"          BYTEA,
+	"value"        BYTEA,
+	headers        JSONB,
+	attempts       INT NOT NULL DEFAULT 0,
+	quarantined_at TIMESTAMPTZ,
+	created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 )`
 
 // Dialect is the Postgres outbox.Dialect. Its zero value is ready to
@@ -27,10 +29,12 @@ func (Dialect) InsertSQL() string {
 }
 
 // ClaimSQL locks up to $1 rows in id order, skipping the rows another
-// relay's transaction already holds. The locks live until the claiming
-// transaction ends, which is what keeps two relays off the same row.
+// relay's transaction already holds and rows already quarantined. The
+// locks live until the claiming transaction ends, which is what keeps
+// two relays off the same row.
 func (Dialect) ClaimSQL() string {
-	return `SELECT id, topic, "key", "value", headers FROM ` + Table + `
+	return `SELECT id, topic, "key", "value", headers, attempts FROM ` + Table + `
+	WHERE quarantined_at IS NULL
 	ORDER BY id
 	LIMIT $1
 	FOR UPDATE SKIP LOCKED`
@@ -39,4 +43,16 @@ func (Dialect) ClaimSQL() string {
 // DeleteSQL deletes the row with id $1.
 func (Dialect) DeleteSQL() string {
 	return `DELETE FROM ` + Table + ` WHERE id = $1`
+}
+
+// IncrementAttemptsSQL records a failed publish attempt against the row
+// with id $1.
+func (Dialect) IncrementAttemptsSQL() string {
+	return `UPDATE ` + Table + ` SET attempts = attempts + 1 WHERE id = $1`
+}
+
+// QuarantineSQL marks the row with id $1 as quarantined, excluding it
+// from future ClaimSQL results.
+func (Dialect) QuarantineSQL() string {
+	return `UPDATE ` + Table + ` SET quarantined_at = now(), attempts = attempts + 1 WHERE id = $1`
 }

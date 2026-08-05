@@ -14,7 +14,9 @@ package outbox_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -109,6 +111,70 @@ func TestEnqueueCommitsWithTheCallersTransaction(t *testing.T) {
 	})
 }
 
+// TestEnqueueRejectsOverLimitTopicIdenticallyOnBothDialects covers the
+// shared topic length limit: a topic longer than outbox.MaxTopicLength
+// (the SQL Server dialect's NVARCHAR(255) column width) must be rejected
+// by Enqueue itself, identically on Postgres and SQL Server, before any
+// statement reaches the database. Without this guard, Postgres accepts an
+// over-limit topic silently while SQL Server fails the insert — rolling
+// back the caller's own unrelated business write only on that dialect.
+func TestEnqueueRejectsOverLimitTopicIdenticallyOnBothDialects(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		ctx := context.Background()
+
+		if _, err := db.ExecContext(ctx, b.CreateOrdersSQL); err != nil {
+			t.Fatalf("creating business table: %v", err)
+		}
+		ob, err := outbox.New(b.Dialect)
+		if err != nil {
+			t.Fatalf("building outbox: %v", err)
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("beginning transaction: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.ExecContext(ctx, b.InsertOrderSQL, "order-1"); err != nil {
+			t.Fatalf("inserting business row: %v", err)
+		}
+
+		overLimit := strings.Repeat("t", outbox.MaxTopicLength+1)
+		if err := ob.Enqueue(ctx, tx, overLimit, nil, nil, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Fatalf("Enqueue(over-limit topic) = %v, want an error wrapping ErrInvalidConfig", err)
+		}
+
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rolling back: %v", err)
+		}
+		if n := b.Count(t, db); n != 0 {
+			t.Errorf("outbox rows after a rejected over-limit topic = %d, want 0", n)
+		}
+
+		// NVARCHAR(255) is a 255-*character* column, so the limit must
+		// count runes, not UTF-8 bytes: a topic of exactly MaxTopicLength
+		// multi-byte characters — whose byte length is more than double
+		// that — must still be accepted.
+		atLimit := strings.Repeat("é", outbox.MaxTopicLength)
+		tx2, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("beginning transaction: %v", err)
+		}
+		defer func() { _ = tx2.Rollback() }()
+
+		if err := ob.Enqueue(ctx, tx2, atLimit, nil, nil, nil); err != nil {
+			t.Fatalf("Enqueue(%d-character multi-byte topic) = %v, want no error", outbox.MaxTopicLength, err)
+		}
+		if err := tx2.Commit(); err != nil {
+			t.Fatalf("committing: %v", err)
+		}
+		if n := b.Count(t, db); n != 1 {
+			t.Errorf("outbox rows after an at-limit multi-byte topic = %d, want 1", n)
+		}
+	})
+}
+
 // TestRelayPublishesStagedRowsThenDeletesThem covers the happy path: a
 // batch staged in one transaction is published in id order with the
 // row's id stamped as the event id, and the rows are gone afterwards.
@@ -121,7 +187,7 @@ func TestRelayPublishesStagedRowsThenDeletesThem(t *testing.T) {
 		})
 
 		p := &fakeProducer{}
-		startRelay(t, b, db, p, 10)
+		startRelay(t, b, db, p, 10, 0)
 
 		dbtest.WaitFor(t, "the outbox to drain", func() bool { return b.Count(t, db) == 0 })
 
@@ -171,7 +237,11 @@ func TestRelayStopsAtTheFirstUnconfirmedRow(t *testing.T) {
 			}
 			return messaging.Persisted
 		}}
-		startRelay(t, b, db, p, 10)
+		// A high MaxAttempts keeps this test's fast poll interval from
+		// quarantining v2 before the assertions below run: the ordering
+		// guarantee this test covers only holds up to that threshold,
+		// which TestRelayQuarantinesAPermanentlyUnpublishableRow covers.
+		startRelay(t, b, db, p, 10, 1000)
 
 		dbtest.WaitFor(t, "the confirmed row to be deleted", func() bool { return b.Count(t, db) == 2 })
 
@@ -196,6 +266,71 @@ func TestRelayStopsAtTheFirstUnconfirmedRow(t *testing.T) {
 		values := p.values()
 		if got := values[len(values)-2:]; !slices.Equal(got, []string{"v2", "v3"}) {
 			t.Errorf("last published values = %v, want [v2 v3]", got)
+		}
+	})
+}
+
+// TestRelayQuarantinesAPermanentlyUnpublishableRow covers the poison-row
+// policy: a row whose publish never gets confirmed is quarantined after
+// MaxAttempts instead of blocking every row staged after it forever, and
+// the rows behind it are still delivered.
+func TestRelayQuarantinesAPermanentlyUnpublishableRow(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		ids := enqueueAll(t, b, db, []event{
+			{topic: "orders", key: "k1", value: "poison"},
+			{topic: "orders", key: "k2", value: "v2"},
+			{topic: "orders", key: "k3", value: "v3"},
+		})
+
+		p := &fakeProducer{status: func(value []byte) messaging.DeliveryStatus {
+			if string(value) == "poison" {
+				return messaging.PossiblyPersisted
+			}
+			return messaging.Persisted
+		}}
+
+		relay, err := outbox.NewRelay(outbox.RelayConfig{
+			DB:           db,
+			Dialect:      b.Dialect,
+			Producer:     p,
+			BatchSize:    10,
+			PollInterval: pollInterval,
+			MaxAttempts:  3,
+		})
+		if err != nil {
+			t.Fatalf("building relay: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- relay.Run(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("Run did not return within 5s of cancelling its context")
+			}
+		})
+
+		dbtest.WaitFor(t, "the poison row to be quarantined", func() bool {
+			return len(b.QuarantinedIDs(t, db)) == 1
+		})
+		if got := b.QuarantinedIDs(t, db); !slices.Equal(got, ids[:1]) {
+			t.Errorf("quarantined ids = %v, want %v", got, ids[:1])
+		}
+
+		dbtest.WaitFor(t, "the rows behind the poison row to drain", func() bool { return b.Count(t, db) == 1 })
+
+		// Only the quarantined row remains staged; it was never deleted.
+		if got := b.IDs(t, db); !slices.Equal(got, ids[:1]) {
+			t.Errorf("staged ids = %v, want only the quarantined row %v", got, ids[:1])
+		}
+		if !slices.Contains(p.values(), "v2") || !slices.Contains(p.values(), "v3") {
+			t.Errorf("rows staged after the poison row were not published: %v", p.values())
 		}
 	})
 }
@@ -249,7 +384,7 @@ func TestConcurrentRelaysClaimDisjointRows(t *testing.T) {
 			p.beforeProduce = func() { once.Do(enter) }
 			producers[i] = p
 			// Two rows each, so both relays have work to claim.
-			startRelay(t, b, db, p, 2)
+			startRelay(t, b, db, p, 2, 0)
 		}
 
 		dbtest.WaitFor(t, "the outbox to drain", func() bool { return b.Count(t, db) == 0 })
@@ -318,8 +453,9 @@ func TestRunReturnsWhenContextIsCancelled(t *testing.T) {
 }
 
 // startRelay runs a relay against db for the duration of the test,
-// stopping it during cleanup.
-func startRelay(t *testing.T, b dbtest.Backend, db *sql.DB, p *fakeProducer, batchSize int) {
+// stopping it during cleanup. maxAttempts is passed through as
+// RelayConfig.MaxAttempts; 0 selects the default.
+func startRelay(t *testing.T, b dbtest.Backend, db *sql.DB, p *fakeProducer, batchSize, maxAttempts int) {
 	t.Helper()
 
 	relay, err := outbox.NewRelay(outbox.RelayConfig{
@@ -328,6 +464,7 @@ func startRelay(t *testing.T, b dbtest.Backend, db *sql.DB, p *fakeProducer, bat
 		Producer:     p,
 		BatchSize:    batchSize,
 		PollInterval: pollInterval,
+		MaxAttempts:  maxAttempts,
 	})
 	if err != nil {
 		t.Fatalf("building relay: %v", err)
