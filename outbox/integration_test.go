@@ -14,7 +14,9 @@ package outbox_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +108,70 @@ func TestEnqueueCommitsWithTheCallersTransaction(t *testing.T) {
 				t.Errorf("business rows after commit = %d, want 1", n)
 			}
 		})
+	})
+}
+
+// TestEnqueueRejectsOverLimitTopicIdenticallyOnBothDialects covers the
+// shared topic length limit: a topic longer than outbox.MaxTopicLength
+// (the SQL Server dialect's NVARCHAR(255) column width) must be rejected
+// by Enqueue itself, identically on Postgres and SQL Server, before any
+// statement reaches the database. Without this guard, Postgres accepts an
+// over-limit topic silently while SQL Server fails the insert — rolling
+// back the caller's own unrelated business write only on that dialect.
+func TestEnqueueRejectsOverLimitTopicIdenticallyOnBothDialects(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		ctx := context.Background()
+
+		if _, err := db.ExecContext(ctx, b.CreateOrdersSQL); err != nil {
+			t.Fatalf("creating business table: %v", err)
+		}
+		ob, err := outbox.New(b.Dialect)
+		if err != nil {
+			t.Fatalf("building outbox: %v", err)
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("beginning transaction: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.ExecContext(ctx, b.InsertOrderSQL, "order-1"); err != nil {
+			t.Fatalf("inserting business row: %v", err)
+		}
+
+		overLimit := strings.Repeat("t", outbox.MaxTopicLength+1)
+		if err := ob.Enqueue(ctx, tx, overLimit, nil, nil, nil); !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Fatalf("Enqueue(over-limit topic) = %v, want an error wrapping ErrInvalidConfig", err)
+		}
+
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("rolling back: %v", err)
+		}
+		if n := b.Count(t, db); n != 0 {
+			t.Errorf("outbox rows after a rejected over-limit topic = %d, want 0", n)
+		}
+
+		// NVARCHAR(255) is a 255-*character* column, so the limit must
+		// count runes, not UTF-8 bytes: a topic of exactly MaxTopicLength
+		// multi-byte characters — whose byte length is more than double
+		// that — must still be accepted.
+		atLimit := strings.Repeat("é", outbox.MaxTopicLength)
+		tx2, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("beginning transaction: %v", err)
+		}
+		defer func() { _ = tx2.Rollback() }()
+
+		if err := ob.Enqueue(ctx, tx2, atLimit, nil, nil, nil); err != nil {
+			t.Fatalf("Enqueue(%d-character multi-byte topic) = %v, want no error", outbox.MaxTopicLength, err)
+		}
+		if err := tx2.Commit(); err != nil {
+			t.Fatalf("committing: %v", err)
+		}
+		if n := b.Count(t, db); n != 1 {
+			t.Errorf("outbox rows after an at-limit multi-byte topic = %d, want 1", n)
+		}
 	})
 }
 

@@ -19,9 +19,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/zuksmaq/messaging"
 )
+
+// MaxEventIDLength is the longest event id HasProcessed and MarkProcessed
+// accept. It matches the SQL Server dialect's NVARCHAR(255) event_id
+// column (see inbox/sqlserver.CreateTableSQL) so an over-limit event id
+// is rejected the same way regardless of which dialect is configured.
+// The outbox module enforces the same numeric limit on its own bounded
+// column.
+const MaxEventIDLength = 255
 
 // Dialect supplies the SQL that differs per database. The core package
 // holds no SQL of its own; inbox/postgres implements this.
@@ -68,6 +77,9 @@ func (i *Inbox) HasProcessed(ctx context.Context, tx *sql.Tx, eventID string) (b
 	if eventID == "" {
 		return false, fmt.Errorf("%w: an event id is required", messaging.ErrInvalidConfig)
 	}
+	if n := utf8.RuneCountInString(eventID); n > MaxEventIDLength {
+		return false, fmt.Errorf("%w: event id %q is %d characters, exceeds the %d-character limit", messaging.ErrInvalidConfig, eventID, n, MaxEventIDLength)
+	}
 
 	var found int
 	err := tx.QueryRowContext(ctx, i.dialect.SelectSQL(), eventID).Scan(&found)
@@ -99,6 +111,9 @@ func (i *Inbox) MarkProcessed(ctx context.Context, tx *sql.Tx, eventID string) (
 	}
 	if eventID == "" {
 		return false, fmt.Errorf("%w: an event id is required", messaging.ErrInvalidConfig)
+	}
+	if n := utf8.RuneCountInString(eventID); n > MaxEventIDLength {
+		return false, fmt.Errorf("%w: event id %q is %d characters, exceeds the %d-character limit", messaging.ErrInvalidConfig, eventID, n, MaxEventIDLength)
 	}
 
 	result, err := tx.ExecContext(ctx, i.dialect.InsertSQL(), eventID)
