@@ -16,9 +16,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/zuksmaq/messaging"
 )
+
+// MaxTopicLength is the longest topic name Enqueue accepts. It matches
+// the SQL Server dialect's NVARCHAR(255) topic column (see
+// outbox/sqlserver.CreateTableSQL) so an over-limit topic is rejected the
+// same way regardless of which dialect is configured, instead of a value
+// the Postgres dialect would accept silently rolling back the caller's
+// business transaction only on SQL Server. The inbox module enforces the
+// same numeric limit on its own bounded column.
+const MaxTopicLength = 255
 
 // Row is a staged event. ID is assigned by the database and becomes the
 // messaging.EventIDHeader value the Relay stamps on the published
@@ -85,6 +95,9 @@ func (o *Outbox) Enqueue(ctx context.Context, tx *sql.Tx, topic string, key, val
 	}
 	if topic == "" {
 		return fmt.Errorf("%w: a topic is required", messaging.ErrInvalidConfig)
+	}
+	if n := utf8.RuneCountInString(topic); n > MaxTopicLength {
+		return fmt.Errorf("%w: topic %q is %d characters, exceeds the %d-character limit", messaging.ErrInvalidConfig, topic, n, MaxTopicLength)
 	}
 
 	encoded, err := encodeHeaders(headers)
