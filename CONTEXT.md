@@ -40,7 +40,13 @@ database-agnostic and never import a driver.
   commit once that publish is confirmed), `Halt` (stop without
   committing; message is re-delivered on restart). Never silent. The
   zero `RunnerConfig` selects `Halt`: nothing is dropped until the
-  caller asks for it.
+  caller asks for it. The dead-letter publish and the offset commit are
+  still two separate steps, so a crash between them re-delivers and
+  re-dead-letters the same message; DLQ consumers dedupe on `EventId`
+  (or the dead-letter source headers) exactly as regular `Handler`s do.
+  Re-dead-lettering a message that already carries dead-letter headers
+  (a DLQ replay) namespaces the prior pass's headers under a
+  `previous-` prefix rather than overwriting them.
 - **RawKey / RawValue** — the key and value as the broker delivered
   them, carried on every `ReceivedMessage` alongside the decoded ones.
   They survive a deserialization failure, which is what lets
@@ -63,7 +69,11 @@ database-agnostic and never import a driver.
   transaction (`*sql.Tx`) alongside business writes. A separate relay
   process (`outbox.Relay.Run(ctx)`) polls and publishes staged rows to
   Kafka at-least-once (publish-then-delete), claiming batches under a
-  dialect-specific row lock.
+  dialect-specific row lock. Per-key publish ordering holds only when
+  a single `Relay` instance runs against a given table; running
+  multiple instances against the same table trades that ordering for
+  throughput, since each claims whatever rows the others haven't
+  locked rather than waiting its turn.
 - **Inbox** — consumer-side idempotency store. Records processed
   `EventId`s in the caller's own transaction so a `Handler` can check
   `HasProcessed`/`MarkProcessed` and skip duplicates at-least-once

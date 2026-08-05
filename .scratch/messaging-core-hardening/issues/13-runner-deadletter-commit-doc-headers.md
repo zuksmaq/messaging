@@ -15,14 +15,14 @@ preserved rather than silently overwritten.
 
 **Status:** ready-for-agent
 
-- [ ] `PoisonMessageAction`'s documentation (doc comment and/or
+- [x] `PoisonMessageAction`'s documentation (doc comment and/or
       `CONTEXT.md`) states the DeadLetter/commit duplication
       trade-off and the dedupe expectation on DLQ consumers
       explicitly.
-- [ ] Dead-lettering a message that already carries dead-letter
+- [x] Dead-lettering a message that already carries dead-letter
       headers from a prior pass preserves the prior pass's values
       (e.g. under a distinct/nested key) instead of overwriting
       them.
-- [ ] A test dead-letters a message twice (simulating a DLQ replay)
+- [x] A test dead-letters a message twice (simulating a DLQ replay)
       and asserts both passes' dead-letter information is present
       afterward.
