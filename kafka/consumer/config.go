@@ -13,6 +13,9 @@ import (
 // zero.
 const DefaultReadyCheckTimeout = 30 * time.Second
 
+// DefaultCommitTimeout is applied by New when CommitTimeout is zero.
+const DefaultCommitTimeout = 30 * time.Second
+
 // OffsetReset selects where a consumer group starts reading a partition
 // for which it has no committed offset.
 type OffsetReset string
@@ -60,6 +63,10 @@ type Config struct {
 	// ReadyCheckTimeout bounds ReadyCheck when ctx has no earlier
 	// deadline. Defaults to DefaultReadyCheckTimeout.
 	ReadyCheckTimeout time.Duration
+
+	// CommitTimeout bounds Commit when ctx has no earlier deadline.
+	// Defaults to DefaultCommitTimeout.
+	CommitTimeout time.Duration
 }
 
 // Validate reports whether the mandatory fields are present and the
@@ -94,6 +101,9 @@ func (c Config) Validate() error {
 	if c.ReadyCheckTimeout < 0 {
 		return fmt.Errorf("%w: ready check timeout must not be negative", messaging.ErrInvalidConfig)
 	}
+	if c.CommitTimeout < 0 {
+		return fmt.Errorf("%w: commit timeout must not be negative", messaging.ErrInvalidConfig)
+	}
 	if err := kafka.ValidateSchemaRegistry(c.SchemaRegistry, c.KeyFormat, c.ValueFormat); err != nil {
 		return err
 	}
@@ -109,6 +119,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.ReadyCheckTimeout == 0 {
 		c.ReadyCheckTimeout = DefaultReadyCheckTimeout
+	}
+	if c.CommitTimeout == 0 {
+		c.CommitTimeout = DefaultCommitTimeout
 	}
 	return c
 }

@@ -182,7 +182,22 @@ func (c *Consumer[K, V]) decode(ctx context.Context, m *ckafka.Message) (messagi
 // Commit advances the group's offset past msg, so a restart resumes at
 // the following message. It commits msg.Offset+1 — Kafka stores the next
 // offset to read, not the last one read.
-func (c *Consumer[K, V]) Commit(_ context.Context, msg messaging.ReceivedMessage[K, V]) error {
+//
+// The underlying client call takes no timeout of its own, so Commit
+// checks ctx up front the same way ReadyCheck clamps its own timeout:
+// an already-cancelled or expired ctx returns ctx.Err() immediately,
+// before the broker call is ever attempted.
+func (c *Consumer[K, V]) Commit(ctx context.Context, msg messaging.ReceivedMessage[K, V]) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if timeout := kafka.ClampTimeout(ctx, c.cfg.CommitTimeout); timeout <= 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: no time left to commit", messaging.ErrBroker)
+	}
+
 	topic := msg.Topic
 	next := ckafka.Offset(msg.Offset + 1)
 
