@@ -32,6 +32,15 @@ type Backend struct {
 	// pool with the inbox table already created.
 	Start func(t *testing.T) *sql.DB
 
+	// StartFresh starts a container for the duration of the test and
+	// returns a pool against a database where the inbox table does not
+	// exist yet, so a test can run CreateTableSQL itself.
+	StartFresh func(t *testing.T) *sql.DB
+
+	// CreateTableSQL is the statement StartFresh's caller runs to create
+	// the inbox table.
+	CreateTableSQL string
+
 	// Table is the inbox table Dialect targets.
 	Table string
 
@@ -60,8 +69,9 @@ func (b Backend) Count(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// open opens a pool on dsn and closes it during cleanup.
-func open(t *testing.T, driver, dsn, createTableSQL string) *sql.DB {
+// open opens a pool on dsn and closes it during cleanup. The inbox table
+// is not created; callers that need it do so themselves.
+func open(t *testing.T, driver, dsn string) *sql.DB {
 	t.Helper()
 
 	db, err := sql.Open(driver, dsn)
@@ -73,9 +83,5 @@ func open(t *testing.T, driver, dsn, createTableSQL string) *sql.DB {
 			t.Logf("closing database: %v", err)
 		}
 	})
-
-	if _, err := db.Exec(createTableSQL); err != nil {
-		t.Fatalf("creating inbox table: %v", err)
-	}
 	return db
 }

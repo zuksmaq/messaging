@@ -1,25 +1,52 @@
 // Package sqlserver supplies the SQL Server SQL the inbox core needs,
-// reading with READPAST and inserting under UPDLOCK/HOLDLOCK so
-// concurrent deliveries of one event settle on a single winner without
-// stalling readers.
+// reading with READPAST so readers never stall behind an in-flight
+// insert, and letting the primary key itself settle which of two
+// concurrent inserts of one event id wins.
 package sqlserver
+
+import (
+	"errors"
+
+	mssql "github.com/microsoft/go-mssqldb"
+)
 
 // Table is the inbox table every statement here targets.
 const Table = "messaging_inbox"
+
+// SQL Server error numbers InsertSQL fails with when event_id already
+// has a row: primaryKeyViolation for the primary key constraint this
+// table declares, duplicateKeyRow if a caller's own migration ever added
+// a unique index instead.
+const (
+	primaryKeyViolation = 2627
+	duplicateKeyRow     = 2601
+)
 
 // CreateTableSQL creates the inbox table. It is exported so callers can
 // run it from their own migrations; this package never runs it.
 //
 // SQL Server has no CREATE TABLE IF NOT EXISTS, so the existence check is
-// explicit. The event id is the primary key, which is what makes
+// explicit — and, run from two connections against a database where the
+// table does not exist yet, both can pass that check before either
+// creates it. The TRY/CATCH swallows the second creator's "already an
+// object with that name" error (2714) instead of letting it fail the
+// caller outright. The event id is the primary key, which is what makes
 // recording it a race the database decides rather than one the
 // application has to lock for; it is a bounded NVARCHAR because SQL
 // Server cannot index an unbounded one.
 const CreateTableSQL = `IF OBJECT_ID(N'` + Table + `', N'U') IS NULL
-CREATE TABLE ` + Table + ` (
-	event_id     NVARCHAR(255) NOT NULL PRIMARY KEY,
-	processed_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-)`
+BEGIN
+	BEGIN TRY
+		CREATE TABLE ` + Table + ` (
+			event_id     NVARCHAR(255) NOT NULL PRIMARY KEY,
+			processed_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+		);
+	END TRY
+	BEGIN CATCH
+		IF ERROR_NUMBER() <> 2714
+			THROW;
+	END CATCH
+END`
 
 // Dialect is the SQL Server inbox.Dialect. Its zero value is ready to
 // use.
@@ -39,22 +66,34 @@ func (Dialect) SelectSQL() string {
 	return `SELECT TOP (1) 1 FROM ` + Table + ` WITH (READPAST, ROWLOCK) WHERE event_id = @p1`
 }
 
-// InsertSQL records the event id @p1, reporting one row affected only if
-// this statement is the one that inserted it.
+// InsertSQL records the event id @p1 with a plain insert.
 //
-// SQL Server has no ON CONFLICT DO NOTHING, so the conditional insert is
-// written out and the lock hints do the work the conflict clause does on
-// Postgres. UPDLOCK makes the existence check take a lock no other
-// checker can share, and HOLDLOCK holds it — over the empty range too —
-// until this transaction ends. So a second delivery of the same id waits
-// here rather than passing the check alongside the first: once the
-// winner commits, the row is visible, NOT EXISTS is false, and the loser
-// inserts nothing and is told it lost instead of failing on a primary
-// key violation.
+// SQL Server has no ON CONFLICT DO NOTHING, so unlike Postgres this
+// relies on IsDuplicateKeyError rather than the statement itself to tell
+// a losing insert from a real failure. An earlier version checked
+// existence first under UPDLOCK/HOLDLOCK, but those hints hold a lock
+// over the row's entire empty key-range gap until the transaction ends —
+// serializing every other event id landing in that same gap, not just a
+// second insert of this one. A plain insert only ever contends with
+// another insert of the same id, which is the one case that must
+// serialize.
 func (Dialect) InsertSQL() string {
-	return `INSERT INTO ` + Table + ` (event_id)
-	SELECT @p1
-	WHERE NOT EXISTS (
-		SELECT 1 FROM ` + Table + ` WITH (UPDLOCK, HOLDLOCK, ROWLOCK) WHERE event_id = @p1
-	)`
+	return `INSERT INTO ` + Table + ` (event_id) VALUES (@p1)`
+}
+
+// IsDuplicateKeyError reports whether err is the primary key violation
+// InsertSQL fails with when another transaction already recorded the
+// event id — the signal MarkProcessed treats as losing the race rather
+// than a fault.
+func (Dialect) IsDuplicateKeyError(err error) bool {
+	var sqlErr mssql.Error
+	if !errors.As(err, &sqlErr) {
+		return false
+	}
+	switch sqlErr.Number {
+	case primaryKeyViolation, duplicateKeyRow:
+		return true
+	default:
+		return false
+	}
 }

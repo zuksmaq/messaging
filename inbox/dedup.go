@@ -48,6 +48,17 @@ type Dialect interface {
 	InsertSQL() string
 }
 
+// DuplicateKeyDetector is an optional Dialect capability for a database
+// whose InsertSQL has no upsert-do-nothing of its own: a losing insert
+// fails with a duplicate-key error instead of reporting zero rows
+// affected. MarkProcessed treats that error as the same signal — another
+// transaction already recorded the id — rather than a fault.
+type DuplicateKeyDetector interface {
+	// IsDuplicateKeyError reports whether err is the database's
+	// duplicate-key violation.
+	IsDuplicateKeyError(err error) bool
+}
+
 // Inbox dedups events for a single dialect.
 type Inbox struct {
 	dialect Dialect
@@ -118,6 +129,9 @@ func (i *Inbox) MarkProcessed(ctx context.Context, tx *sql.Tx, eventID string) (
 
 	result, err := tx.ExecContext(ctx, i.dialect.InsertSQL(), eventID)
 	if err != nil {
+		if d, ok := i.dialect.(DuplicateKeyDetector); ok && d.IsDuplicateKeyError(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("recording event %q in the inbox: %w", eventID, err)
 	}
 	recorded, err := result.RowsAffected()
