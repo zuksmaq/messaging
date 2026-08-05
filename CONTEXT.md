@@ -60,7 +60,11 @@ database-agnostic.
   transaction (`*sql.Tx`) alongside business writes. A separate relay
   process (`outbox.Relay.Run(ctx)`) polls and publishes staged rows to
   Kafka at-least-once (publish-then-delete), claiming batches under a
-  dialect-specific row lock.
+  dialect-specific row lock. Per-key publish ordering holds only when
+  a single `Relay` instance runs against a given table; running
+  multiple instances against the same table trades that ordering for
+  throughput, since each claims whatever rows the others haven't
+  locked rather than waiting its turn.
 - **Inbox** — consumer-side idempotency store. Records processed
   `EventId`s in the caller's own transaction so a `Handler` can check
   `HasProcessed`/`MarkProcessed` and skip duplicates at-least-once
