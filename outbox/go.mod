@@ -7,7 +7,7 @@ require (
 	github.com/microsoft/go-mssqldb v1.10.0
 	github.com/testcontainers/testcontainers-go/modules/mssql v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.43.0
-	github.com/zuksmaq/messaging v0.0.0
+	github.com/zuksmaq/messaging v0.1.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
 )
@@ -73,5 +73,3 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/zuksmaq/messaging => ../

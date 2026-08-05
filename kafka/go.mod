@@ -6,7 +6,7 @@ require (
 	github.com/confluentinc/confluent-kafka-go/v2 v2.15.0
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/redpanda v0.43.0
-	github.com/zuksmaq/messaging v0.0.0
+	github.com/zuksmaq/messaging v0.1.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
 	go.opentelemetry.io/otel/sdk/metric v1.44.0
@@ -80,5 +80,3 @@ require (
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/zuksmaq/messaging => ../
