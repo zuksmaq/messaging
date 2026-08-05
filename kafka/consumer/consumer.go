@@ -2,8 +2,10 @@ package consumer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -31,6 +33,15 @@ type Consumer[K, V any] struct {
 	client *ckafka.Consumer
 	cfg    Config
 	logger *slog.Logger
+
+	// pollMu guards against Close tearing down the client while a
+	// Consume call is still polling it: Consume holds the lock only for
+	// the duration of one poll, and Close takes it (waiting out any
+	// in-flight poll) before touching the client, so the two never run
+	// concurrently against the same handle. A plain Mutex is enough —
+	// Consume is a single-caller blocking loop, not a concurrent reader.
+	pollMu sync.Mutex
+	closed bool
 
 	keyDe   kafka.Deserializer[K]
 	valueDe kafka.Deserializer[V]
@@ -125,7 +136,11 @@ func (c *Consumer[K, V]) Consume(ctx context.Context) (messaging.ReceivedMessage
 			return zero, fmt.Errorf("awaiting message: %w", err)
 		}
 
-		switch ev := c.client.Poll(int(pollInterval.Milliseconds())).(type) {
+		ev, err := c.poll()
+		if err != nil {
+			return zero, err
+		}
+		switch ev := ev.(type) {
 		case *ckafka.Message:
 			return c.decode(ctx, ev)
 		case ckafka.Error:
@@ -138,6 +153,20 @@ func (c *Consumer[K, V]) Consume(ctx context.Context) (messaging.ReceivedMessage
 			c.logger.DebugContext(ctx, "kafka consumer client error", slog.String("error", ev.Error()))
 		}
 	}
+}
+
+// poll runs one poll of the underlying client, holding pollMu so a
+// concurrent Close waits for it to finish before tearing the client
+// down. It reports an error instead of polling once the consumer is
+// closed, rather than touching an already-destroyed client handle.
+func (c *Consumer[K, V]) poll() (ckafka.Event, error) {
+	c.pollMu.Lock()
+	defer c.pollMu.Unlock()
+
+	if c.closed {
+		return nil, fmt.Errorf("%w: consumer is closed", messaging.ErrBroker)
+	}
+	return c.client.Poll(int(pollInterval.Milliseconds())), nil
 }
 
 // decode turns a broker message into a ReceivedMessage. A nil key or
@@ -212,15 +241,33 @@ func (c *Consumer[K, V]) ReadyCheck(ctx context.Context) error {
 // Close leaves the consumer group and releases the client. Uncommitted
 // messages are re-delivered to the group; Close never commits on the
 // caller's behalf.
+//
+// Close waits for any in-flight Consume poll to return before touching
+// the client — polling and closing the same handle concurrently is a
+// use-after-free in the underlying library. If both the client and the
+// schema registry fail to close, both errors are reported via
+// errors.Join rather than only one silently winning.
 func (c *Consumer[K, V]) Close() error {
-	err := c.client.Close()
-	// A registry failure is reported only when the client closed cleanly:
-	// losing the group membership is the more urgent news.
-	registryErr := c.registry.Close()
-	if err != nil {
-		return fmt.Errorf("%w: closing consumer: %v", messaging.ErrBroker, err)
+	c.markClosed()
+	return joinCloseErrors(c.client.Close(), c.registry.Close())
+}
+
+// markClosed waits out any poll in flight, then marks the consumer
+// closed. Split out from Close so the wait-for-in-flight-poll behavior
+// is testable without a real client.
+func (c *Consumer[K, V]) markClosed() {
+	c.pollMu.Lock()
+	c.closed = true
+	c.pollMu.Unlock()
+}
+
+// joinCloseErrors combines Close's two independent failure sources so
+// neither is silently dropped when both occur.
+func joinCloseErrors(clientErr, registryErr error) error {
+	if clientErr != nil {
+		clientErr = fmt.Errorf("%w: closing consumer: %v", messaging.ErrBroker, clientErr)
 	}
-	return registryErr
+	return errors.Join(clientErr, registryErr)
 }
 
 func fromHeaders(h []ckafka.Header) map[string][]byte {
