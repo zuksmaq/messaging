@@ -8,12 +8,12 @@ whether `V` is `[]byte`, a decoded struct, or `any`.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `Tombstone()` reports true for a nil-value record regardless
+- [x] `Tombstone()` reports true for a nil-value record regardless
       of the generic value type `V` (raw bytes, a decoded struct,
       and `any` are all covered).
-- [ ] A new test file at the root module (the module's first)
+- [x] A new test file at the root module (the module's first)
       directly exercises `ReceivedMessage.Tombstone()` across at
       least these three value-type shapes, with no broker or
       database dependency.
