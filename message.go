@@ -69,10 +69,21 @@ type ReceivedMessage[K, V any] struct {
 	RawKey   []byte
 	RawValue []byte
 
+	// HeaderList is every header as delivered, in order, preserving
+	// duplicate keys that the Headers convenience map (last-wins)
+	// collapses.
+	HeaderList []Header
+
 	Topic     string
 	Partition int32
 	Offset    int64
 	Timestamp time.Time
+}
+
+// Header is a single broker message header.
+type Header struct {
+	Key   string
+	Value []byte
 }
 
 // Tombstone reports whether this message is a tombstone (a nil
