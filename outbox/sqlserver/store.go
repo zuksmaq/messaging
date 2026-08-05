@@ -16,12 +16,14 @@ const Table = "messaging_outbox"
 // the JSON.
 const CreateTableSQL = `IF OBJECT_ID(N'` + Table + `', N'U') IS NULL
 CREATE TABLE ` + Table + ` (
-	id         BIGINT IDENTITY(1,1) PRIMARY KEY,
-	topic      NVARCHAR(255) NOT NULL,
-	[key]      VARBINARY(MAX),
-	[value]    VARBINARY(MAX),
-	headers    VARBINARY(MAX),
-	created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+	id             BIGINT IDENTITY(1,1) PRIMARY KEY,
+	topic          NVARCHAR(255) NOT NULL,
+	[key]          VARBINARY(MAX),
+	[value]        VARBINARY(MAX),
+	headers        VARBINARY(MAX),
+	attempts       INT NOT NULL DEFAULT 0,
+	quarantined_at DATETIME2 NULL,
+	created_at     DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
 )`
 
 // Dialect is the SQL Server outbox.Dialect. Its zero value is ready to
@@ -40,14 +42,28 @@ func (Dialect) InsertSQL() string {
 // UPDLOCK takes the update locks that outlast the SELECT, READPAST steps
 // over rows another relay has locked instead of blocking on them, and
 // ROWLOCK keeps the engine from escalating to a page lock that would hide
-// unclaimed rows behind a claimed one.
+// unclaimed rows behind a claimed one. Rows already quarantined are
+// excluded.
 func (Dialect) ClaimSQL() string {
-	return `SELECT TOP (@p1) id, topic, [key], [value], headers
+	return `SELECT TOP (@p1) id, topic, [key], [value], headers, attempts
 	FROM ` + Table + ` WITH (UPDLOCK, READPAST, ROWLOCK)
+	WHERE quarantined_at IS NULL
 	ORDER BY id`
 }
 
 // DeleteSQL deletes the row with id @p1.
 func (Dialect) DeleteSQL() string {
 	return `DELETE FROM ` + Table + ` WHERE id = @p1`
+}
+
+// IncrementAttemptsSQL records a failed publish attempt against the row
+// with id @p1.
+func (Dialect) IncrementAttemptsSQL() string {
+	return `UPDATE ` + Table + ` SET attempts = attempts + 1 WHERE id = @p1`
+}
+
+// QuarantineSQL marks the row with id @p1 as quarantined, excluding it
+// from future ClaimSQL results.
+func (Dialect) QuarantineSQL() string {
+	return `UPDATE ` + Table + ` SET quarantined_at = SYSUTCDATETIME(), attempts = attempts + 1 WHERE id = @p1`
 }

@@ -121,7 +121,7 @@ func TestRelayPublishesStagedRowsThenDeletesThem(t *testing.T) {
 		})
 
 		p := &fakeProducer{}
-		startRelay(t, b, db, p, 10)
+		startRelay(t, b, db, p, 10, 0)
 
 		dbtest.WaitFor(t, "the outbox to drain", func() bool { return b.Count(t, db) == 0 })
 
@@ -171,7 +171,11 @@ func TestRelayStopsAtTheFirstUnconfirmedRow(t *testing.T) {
 			}
 			return messaging.Persisted
 		}}
-		startRelay(t, b, db, p, 10)
+		// A high MaxAttempts keeps this test's fast poll interval from
+		// quarantining v2 before the assertions below run: the ordering
+		// guarantee this test covers only holds up to that threshold,
+		// which TestRelayQuarantinesAPermanentlyUnpublishableRow covers.
+		startRelay(t, b, db, p, 10, 1000)
 
 		dbtest.WaitFor(t, "the confirmed row to be deleted", func() bool { return b.Count(t, db) == 2 })
 
@@ -196,6 +200,71 @@ func TestRelayStopsAtTheFirstUnconfirmedRow(t *testing.T) {
 		values := p.values()
 		if got := values[len(values)-2:]; !slices.Equal(got, []string{"v2", "v3"}) {
 			t.Errorf("last published values = %v, want [v2 v3]", got)
+		}
+	})
+}
+
+// TestRelayQuarantinesAPermanentlyUnpublishableRow covers the poison-row
+// policy: a row whose publish never gets confirmed is quarantined after
+// MaxAttempts instead of blocking every row staged after it forever, and
+// the rows behind it are still delivered.
+func TestRelayQuarantinesAPermanentlyUnpublishableRow(t *testing.T) {
+	eachBackend(t, func(t *testing.T, b dbtest.Backend, db *sql.DB) {
+		ids := enqueueAll(t, b, db, []event{
+			{topic: "orders", key: "k1", value: "poison"},
+			{topic: "orders", key: "k2", value: "v2"},
+			{topic: "orders", key: "k3", value: "v3"},
+		})
+
+		p := &fakeProducer{status: func(value []byte) messaging.DeliveryStatus {
+			if string(value) == "poison" {
+				return messaging.PossiblyPersisted
+			}
+			return messaging.Persisted
+		}}
+
+		relay, err := outbox.NewRelay(outbox.RelayConfig{
+			DB:           db,
+			Dialect:      b.Dialect,
+			Producer:     p,
+			BatchSize:    10,
+			PollInterval: pollInterval,
+			MaxAttempts:  3,
+		})
+		if err != nil {
+			t.Fatalf("building relay: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- relay.Run(ctx) }()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("Run = %v, want nil", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("Run did not return within 5s of cancelling its context")
+			}
+		})
+
+		dbtest.WaitFor(t, "the poison row to be quarantined", func() bool {
+			return len(b.QuarantinedIDs(t, db)) == 1
+		})
+		if got := b.QuarantinedIDs(t, db); !slices.Equal(got, ids[:1]) {
+			t.Errorf("quarantined ids = %v, want %v", got, ids[:1])
+		}
+
+		dbtest.WaitFor(t, "the rows behind the poison row to drain", func() bool { return b.Count(t, db) == 1 })
+
+		// Only the quarantined row remains staged; it was never deleted.
+		if got := b.IDs(t, db); !slices.Equal(got, ids[:1]) {
+			t.Errorf("staged ids = %v, want only the quarantined row %v", got, ids[:1])
+		}
+		if !slices.Contains(p.values(), "v2") || !slices.Contains(p.values(), "v3") {
+			t.Errorf("rows staged after the poison row were not published: %v", p.values())
 		}
 	})
 }
@@ -249,7 +318,7 @@ func TestConcurrentRelaysClaimDisjointRows(t *testing.T) {
 			p.beforeProduce = func() { once.Do(enter) }
 			producers[i] = p
 			// Two rows each, so both relays have work to claim.
-			startRelay(t, b, db, p, 2)
+			startRelay(t, b, db, p, 2, 0)
 		}
 
 		dbtest.WaitFor(t, "the outbox to drain", func() bool { return b.Count(t, db) == 0 })
@@ -318,8 +387,9 @@ func TestRunReturnsWhenContextIsCancelled(t *testing.T) {
 }
 
 // startRelay runs a relay against db for the duration of the test,
-// stopping it during cleanup.
-func startRelay(t *testing.T, b dbtest.Backend, db *sql.DB, p *fakeProducer, batchSize int) {
+// stopping it during cleanup. maxAttempts is passed through as
+// RelayConfig.MaxAttempts; 0 selects the default.
+func startRelay(t *testing.T, b dbtest.Backend, db *sql.DB, p *fakeProducer, batchSize, maxAttempts int) {
 	t.Helper()
 
 	relay, err := outbox.NewRelay(outbox.RelayConfig{
@@ -328,6 +398,7 @@ func startRelay(t *testing.T, b dbtest.Backend, db *sql.DB, p *fakeProducer, bat
 		Producer:     p,
 		BatchSize:    batchSize,
 		PollInterval: pollInterval,
+		MaxAttempts:  maxAttempts,
 	})
 	if err != nil {
 		t.Fatalf("building relay: %v", err)

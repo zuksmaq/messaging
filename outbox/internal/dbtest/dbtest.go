@@ -85,6 +85,31 @@ func (b Backend) IDs(t *testing.T, db *sql.DB) []int64 {
 	return ids
 }
 
+// QuarantinedIDs returns the ids of the outbox rows marked quarantined,
+// in id order.
+func (b Backend) QuarantinedIDs(t *testing.T, db *sql.DB) []int64 {
+	t.Helper()
+
+	rows, err := db.Query(`SELECT id FROM ` + b.Table + ` WHERE quarantined_at IS NOT NULL ORDER BY id`)
+	if err != nil {
+		t.Fatalf("listing quarantined outbox rows: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scanning quarantined outbox id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("listing quarantined outbox rows: %v", err)
+	}
+	return ids
+}
+
 // WaitFor polls cond until it holds, failing the test if it has not
 // within a few seconds. The relay is a background loop, so tests assert
 // on where it gets to rather than on individual polls.
