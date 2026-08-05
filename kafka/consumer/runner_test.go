@@ -292,6 +292,90 @@ func TestRunHalt(t *testing.T) {
 	}
 }
 
+// TestRunHandlerPanic asserts a Handler panic is recovered and routed
+// through the same poison-message handling as a returned error, under
+// each configured PoisonMessageAction.
+func TestRunHandlerPanic(t *testing.T) {
+	t.Parallel()
+
+	t.Run("skip", func(t *testing.T) {
+		t.Parallel()
+
+		c := &fakeConsumer{script: []consumeResult{{msg: received(1)}, {msg: received(2)}}}
+		logs, logger := testLogger()
+		reader, meter := testMeter()
+
+		err := run(t, c, panicOn(1), RunnerConfig{PoisonAction: Skip},
+			kafka.WithLogger(logger), kafka.WithMetrics(meter))
+
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+		if want := []int64{1, 2}; !slices.Equal(c.committed, want) {
+			t.Errorf("committed offsets = %v, want %v — Skip commits past the panicking message", c.committed, want)
+		}
+		assertPoisonReported(t, logs, reader, Skip)
+	})
+
+	t.Run("dead letter", func(t *testing.T) {
+		t.Parallel()
+
+		c := &fakeConsumer{script: []consumeResult{{msg: received(1)}, {msg: received(2)}}}
+		p := &fakeProducer{status: messaging.Persisted}
+		logs, logger := testLogger()
+		reader, meter := testMeter()
+
+		err := run(t, c, panicOn(1), RunnerConfig{
+			PoisonAction:       DeadLetter,
+			DeadLetterTopic:    dlqTopic,
+			DeadLetterProducer: p,
+		}, kafka.WithLogger(logger), kafka.WithMetrics(meter))
+
+		if err != nil {
+			t.Fatalf("Run = %v, want nil", err)
+		}
+		if len(p.published) != 1 {
+			t.Fatalf("dead-lettered messages = %d, want 1", len(p.published))
+		}
+		if got := p.published[0]; got.topic != dlqTopic {
+			t.Errorf("dead-letter topic = %q, want %q", got.topic, dlqTopic)
+		}
+		if v := string(p.published[0].headers[DeadLetterErrorHeader]); !strings.Contains(v, panicValue) {
+			t.Errorf("dead-lettered %s header = %q, want it to mention the recovered panic value %q", DeadLetterErrorHeader, v, panicValue)
+		}
+		if want := []int64{1, 2}; !slices.Equal(c.committed, want) {
+			t.Errorf("committed offsets = %v, want %v", c.committed, want)
+		}
+		assertPoisonReported(t, logs, reader, DeadLetter)
+	})
+
+	t.Run("halt", func(t *testing.T) {
+		t.Parallel()
+
+		c := &fakeConsumer{script: []consumeResult{{msg: received(1)}, {msg: received(2)}}}
+		logs, logger := testLogger()
+		reader, meter := testMeter()
+
+		// The zero RunnerConfig selects Halt.
+		err := run(t, c, panicOn(1), RunnerConfig{},
+			kafka.WithLogger(logger), kafka.WithMetrics(meter))
+
+		if err == nil {
+			t.Fatal("Run = nil, want the recovered panic to stop the loop")
+		}
+		if !strings.Contains(err.Error(), panicValue) {
+			t.Errorf("Run error = %v, want it to mention the recovered panic value %q", err, panicValue)
+		}
+		if len(c.committed) != 0 {
+			t.Errorf("committed offsets = %v, want none under Halt", c.committed)
+		}
+		if c.next != 1 {
+			t.Errorf("consumed %d messages, want the loop to stop at the panicking message", c.next)
+		}
+		assertPoisonReported(t, logs, reader, Halt)
+	})
+}
+
 func TestRunReturnsBrokerAndCommitErrors(t *testing.T) {
 	t.Parallel()
 
@@ -365,6 +449,20 @@ func failOn(bad int64) Handler[string, string] {
 	return func(_ context.Context, msg messaging.ReceivedMessage[string, string]) error {
 		if msg.Offset == bad {
 			return errHandler
+		}
+		return nil
+	}
+}
+
+// panicValue is what panicOn's handler panics with.
+const panicValue = "handler blew up"
+
+// panicOn returns a handler that panics on the message at offset bad and
+// accepts every other one.
+func panicOn(bad int64) Handler[string, string] {
+	return func(_ context.Context, msg messaging.ReceivedMessage[string, string]) error {
+		if msg.Offset == bad {
+			panic(panicValue)
 		}
 		return nil
 	}
