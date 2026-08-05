@@ -3,6 +3,11 @@
 // take disjoint rows.
 package postgres
 
+import (
+	"strconv"
+	"time"
+)
+
 // Table is the outbox table every statement here targets.
 const Table = "messaging_outbox"
 
@@ -55,4 +60,15 @@ func (Dialect) IncrementAttemptsSQL() string {
 // from future ClaimSQL results.
 func (Dialect) QuarantineSQL() string {
 	return `UPDATE ` + Table + ` SET quarantined_at = now(), attempts = attempts + 1 WHERE id = $1`
+}
+
+// LeaseSQL bounds how long the claiming transaction may sit idle before
+// Postgres itself aborts it and releases the row locks ClaimSQL took —
+// what reclaims a batch a relay abandoned mid-claim (killed outright, or
+// its connection dropped invisibly to a pooler) within d, instead of
+// leaving the rows locked until something else notices the dead
+// connection. Scoped to the transaction with SET LOCAL, so it resets on
+// commit or rollback rather than lingering on a pooled connection.
+func (Dialect) LeaseSQL(d time.Duration) string {
+	return "SET LOCAL idle_in_transaction_session_timeout = " + strconv.FormatInt(d.Milliseconds(), 10)
 }

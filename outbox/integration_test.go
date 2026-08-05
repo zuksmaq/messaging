@@ -24,6 +24,7 @@ import (
 	"github.com/zuksmaq/messaging"
 	"github.com/zuksmaq/messaging/outbox"
 	"github.com/zuksmaq/messaging/outbox/internal/dbtest"
+	"github.com/zuksmaq/messaging/outbox/postgres"
 )
 
 // pollInterval keeps the tests quick; the relay's default of a second
@@ -459,6 +460,83 @@ func TestConcurrentRelaysCanInterleaveSameKeyRows(t *testing.T) {
 			t.Fatalf("relay A published = %v, want [older]", got)
 		}
 	})
+}
+
+// TestAbandonedClaimIsReclaimedWithinTheLeaseTimeout proves the fix for
+// a relay that dies mid-batch: with LeaseTimeout configured, Postgres
+// itself aborts a transaction left idle past the timeout and releases
+// the row lock ClaimSQL took, so a second relay claims and publishes the
+// row instead of it staying locked until something else notices the
+// dead connection.
+//
+// SQL Server has no session-level idle-in-transaction timeout to set
+// (see sqlserver's package doc), so this is Postgres-only.
+func TestAbandonedClaimIsReclaimedWithinTheLeaseTimeout(t *testing.T) {
+	var b dbtest.Backend
+	for _, backend := range dbtest.Backends() {
+		if backend.Name == "postgres" {
+			b = backend
+		}
+	}
+	db := b.Start(t)
+
+	ids := enqueueAll(t, b, db, []event{{topic: "orders", key: "k1", value: "v1"}})
+
+	const lease = 200 * time.Millisecond
+	ctx := context.Background()
+
+	// Simulate a relay that claims the row and then dies mid-batch: hold
+	// its own connection, set the same lease Relay would, claim the row,
+	// and never commit, roll back or close anything from here on — the
+	// database is on its own to notice.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("opening abandoned connection: %v", err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("beginning abandoned transaction: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, postgres.Dialect{}.LeaseSQL(lease)); err != nil {
+		t.Fatalf("setting lease timeout: %v", err)
+	}
+	rows, err := tx.QueryContext(ctx, b.Dialect.ClaimSQL(), 10)
+	if err != nil {
+		t.Fatalf("claiming as the abandoned relay: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("closing claim result set: %v", err)
+	}
+
+	// The row is locked and claimed here, but not published anywhere: a
+	// second relay must not see it yet.
+	if n := b.Count(t, db); n != 1 {
+		t.Fatalf("outbox rows while claimed = %d, want 1 (still staged, just locked)", n)
+	}
+
+	p := &fakeProducer{}
+	relay, err := outbox.NewRelay(outbox.RelayConfig{
+		DB:           db,
+		Dialect:      b.Dialect,
+		Producer:     p,
+		BatchSize:    10,
+		PollInterval: pollInterval,
+		LeaseTimeout: lease,
+	})
+	if err != nil {
+		t.Fatalf("building relay: %v", err)
+	}
+	relayCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = relay.Run(relayCtx) }()
+
+	dbtest.WaitFor(t, "the abandoned claim to be released and republished", func() bool {
+		return len(p.calls()) == 1
+	})
+	if got := p.values(); !slices.Equal(got, []string{"v1"}) {
+		t.Fatalf("published values = %v, want [v1]", got)
+	}
+	assertEventIDsMatchRowIDs(t, p.calls(), ids)
 }
 
 // TestRunReturnsWhenContextIsCancelled covers shutdown: Run is a

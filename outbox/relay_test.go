@@ -76,6 +76,19 @@ func TestRelayConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "lease timeout set",
+			cfg: outbox.RelayConfig{
+				DB: db, Dialect: postgres.Dialect{}, Producer: nopProducer{}, LeaseTimeout: 30 * time.Second,
+			},
+		},
+		{
+			name: "negative lease timeout",
+			cfg: outbox.RelayConfig{
+				DB: db, Dialect: postgres.Dialect{}, Producer: nopProducer{}, LeaseTimeout: -time.Second,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -147,6 +160,42 @@ func TestEnqueueRejectsMissingArguments(t *testing.T) {
 			t.Fatalf("Enqueue(empty topic) = %v, want an error wrapping ErrInvalidConfig", err)
 		}
 	})
+
+	t.Run("reserved event id header", func(t *testing.T) {
+		t.Parallel()
+
+		headers := map[string][]byte{messaging.EventIDHeader: []byte("caller-supplied")}
+		err := ob.Enqueue(context.Background(), &sql.Tx{}, "orders", nil, nil, headers)
+		if !errors.Is(err, messaging.ErrInvalidConfig) {
+			t.Fatalf("Enqueue(reserved header) = %v, want an error wrapping ErrInvalidConfig", err)
+		}
+	})
+}
+
+// TestZeroValueOutboxFailsSafely covers an &Outbox{} built by a DI
+// container bypassing New: it has no dialect, so Enqueue must return a
+// configuration error rather than dereference a nil interface.
+func TestZeroValueOutboxFailsSafely(t *testing.T) {
+	t.Parallel()
+
+	var ob outbox.Outbox
+	err := ob.Enqueue(context.Background(), &sql.Tx{}, "orders", nil, nil, nil)
+	if !errors.Is(err, messaging.ErrInvalidConfig) {
+		t.Fatalf("Enqueue on a zero-value Outbox = %v, want an error wrapping ErrInvalidConfig", err)
+	}
+}
+
+// TestZeroValueRelayRunFailsSafely covers an &Relay{} built by a DI
+// container bypassing NewRelay: it has no database, dialect or producer,
+// so Run must return a configuration error rather than panic.
+func TestZeroValueRelayRunFailsSafely(t *testing.T) {
+	t.Parallel()
+
+	var r outbox.Relay
+	err := r.Run(context.Background())
+	if !errors.Is(err, messaging.ErrInvalidConfig) {
+		t.Fatalf("Run on a zero-value Relay = %v, want an error wrapping ErrInvalidConfig", err)
+	}
 }
 
 // TestPostgresDialectSQL pins the parts of the Postgres statements the
@@ -171,6 +220,22 @@ func TestPostgresDialectSQL(t *testing.T) {
 				t.Errorf("SQL %q does not contain %q", tt.sql, tt.want)
 			}
 		})
+	}
+}
+
+// TestPostgresLeaseSQL pins the claim lease/timeout mechanism: Relay
+// sets this per claiming transaction so Postgres itself aborts one left
+// idle past timeout, releasing the row locks FOR UPDATE took instead of
+// leaving them held until something else notices the dead connection.
+func TestPostgresLeaseSQL(t *testing.T) {
+	t.Parallel()
+
+	got := postgres.Dialect{}.LeaseSQL(30 * time.Second)
+	if !strings.Contains(got, "idle_in_transaction_session_timeout") {
+		t.Errorf("LeaseSQL(30s) = %q, want it to set idle_in_transaction_session_timeout", got)
+	}
+	if !strings.Contains(got, "30000") {
+		t.Errorf("LeaseSQL(30s) = %q, want the timeout expressed in milliseconds", got)
 	}
 }
 

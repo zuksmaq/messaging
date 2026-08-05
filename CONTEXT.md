@@ -73,7 +73,12 @@ database-agnostic and never import a driver.
   a single `Relay` instance runs against a given table; running
   multiple instances against the same table trades that ordering for
   throughput, since each claims whatever rows the others haven't
-  locked rather than waiting its turn.
+  locked rather than waiting its turn. A claim's row locks are held by
+  the database, not the relay process, so `RelayConfig.LeaseTimeout`
+  bounds how long a claiming transaction may sit idle before the
+  database itself aborts it and releases those locks — how a relay that
+  dies mid-batch stops blocking the rows it abandoned, on a dialect
+  that supports a session-level timeout (Postgres).
 - **Inbox** — consumer-side idempotency store. Records processed
   `EventId`s in the caller's own transaction so a `Handler` can check
   `HasProcessed`/`MarkProcessed` and skip duplicates at-least-once

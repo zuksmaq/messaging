@@ -117,9 +117,10 @@ func NewSchemaRegistry(cfg SchemaRegistryConfig) (*SchemaRegistry, error) {
 
 // Close releases the client's cached schemas and connections. It is safe
 // to call on a nil *SchemaRegistry, so a producer or consumer built for a
-// registry-less format can close unconditionally.
+// registry-less format can close unconditionally. It is also safe on a
+// zero-value SchemaRegistry, which has no client to close.
 func (r *SchemaRegistry) Close() error {
-	if r == nil {
+	if r == nil || r.client == nil {
 		return nil
 	}
 	if err := r.client.Close(); err != nil {
