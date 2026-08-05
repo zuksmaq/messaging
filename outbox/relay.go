@@ -48,7 +48,6 @@ type RelayConfig struct {
 	// blocking rows staged after it. Defaults to 5.
 	MaxAttempts int
 
-
 	// LeaseTimeout bounds how long a claiming transaction may sit idle
 	// before the database itself aborts it and releases the row locks
 	// the claim took. This is what reclaims a batch a relay abandoned
@@ -62,6 +61,20 @@ type RelayConfig struct {
 	// session-level timeout to set ignores it. See the Dialect
 	// implementations' docs for what else, if anything, to configure on
 	// the underlying connection for that database.
+	//
+	// The timeout applies for the whole claim-publish-delete
+	// transaction, including time spent inside Producer.Produce, not
+	// just idle-and-abandoned time: set it comfortably above the
+	// producer's expected publish latency for a full batch, or a
+	// slow-but-live relay gets its transaction aborted the same way a
+	// dead one does.
+	//
+	// This is one half of the reclaim story; the other is bounding how
+	// long the database takes to notice a claiming connection actually
+	// died (as opposed to sitting idle) rather than waiting on it
+	// indefinitely — configure TCP keepalive on the underlying driver's
+	// connection for that (e.g. a custom net.Dialer set on pgx's
+	// pgconn.Config.DialFunc, or go-mssqldb's "keepAlive" DSN parameter).
 	LeaseTimeout time.Duration
 }
 
