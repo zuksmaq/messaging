@@ -78,6 +78,121 @@ func TestCloseReportsUnflushedMessages(t *testing.T) {
 	}
 }
 
+// TestCloseTwiceIsSafeNoOp covers the ordinary defer-plus-explicit-
+// cleanup shutdown idiom: a second Close call must not re-invoke the
+// underlying client's flush/close, panic, or hang. Queuing messages
+// that can never be acknowledged and inspecting the unflushed counter
+// proves the second call didn't re-run the flush: a re-invocation
+// would double-count the residual.
+func TestCloseTwiceIsSafeNoOp(t *testing.T) {
+	t.Parallel()
+
+	const queued = 3
+
+	reader, meter := testMeter()
+	p, err := New[string, []byte](Config{
+		BootstrapServers: "127.0.0.1:1",
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatBytes,
+		FlushTimeout:     50 * time.Millisecond,
+	}, kafka.WithMetrics(meter))
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+
+	topic := "unreachable"
+	for range queued {
+		msg := &ckafka.Message{
+			TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: ckafka.PartitionAny},
+			Value:          []byte("payload"),
+		}
+		if err := p.client.Produce(msg, nil); err != nil {
+			t.Fatalf("enqueuing message: %v", err)
+		}
+	}
+
+	firstErr := p.Close(context.Background())
+	if firstErr == nil {
+		t.Fatal("first Close() = nil, want an error reporting the unflushed residual")
+	}
+
+	start := time.Now()
+	secondErr := p.Close(context.Background())
+	elapsed := time.Since(start)
+
+	if secondErr != firstErr {
+		t.Errorf("second Close() = %v, want the cached result from the first call (%v)", secondErr, firstErr)
+	}
+	if elapsed > time.Second {
+		t.Errorf("second Close() took %s, want near-immediate", elapsed)
+	}
+	if got := counterValue(t, reader, "messaging.producer.unflushed"); got != queued {
+		t.Errorf("messaging.producer.unflushed = %d after two Close() calls, want %d (second call must not re-flush)", got, queued)
+	}
+}
+
+// TestCloseWithCancelledContextReturnsPromptly covers shutdown under
+// an already-cancelled context: Close must notice immediately rather
+// than waiting out the full configured FlushTimeout.
+func TestCloseWithCancelledContextReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	p, err := New[string, []byte](Config{
+		BootstrapServers: "127.0.0.1:1",
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatBytes,
+		FlushTimeout:     10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close(context.Background()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_ = p.Close(ctx)
+	elapsed := time.Since(start)
+
+	if elapsed > time.Second {
+		t.Errorf("Close() with a cancelled context took %s, want near-immediate", elapsed)
+	}
+}
+
+// TestReadyCheckWithCancelledContextReturnsPromptly covers readiness
+// checks under an already-cancelled context: ReadyCheck must notice
+// immediately rather than waiting out the full configured
+// ProduceTimeout.
+func TestReadyCheckWithCancelledContextReturnsPromptly(t *testing.T) {
+	t.Parallel()
+
+	p, err := New[string, []byte](Config{
+		BootstrapServers: "127.0.0.1:1",
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatBytes,
+		ProduceTimeout:   10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+	t.Cleanup(func() { _ = p.Close(context.Background()) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	err = p.ReadyCheck(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("ReadyCheck() = nil, want an error for a cancelled context")
+	}
+	if elapsed > time.Second {
+		t.Errorf("ReadyCheck() with a cancelled context took %s, want near-immediate", elapsed)
+	}
+}
+
 // counterValue collects reader and returns the sum recorded against
 // the named Int64 counter.
 func counterValue(t *testing.T, reader interface {

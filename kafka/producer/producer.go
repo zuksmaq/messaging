@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	ckafka "github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -31,6 +32,12 @@ type Producer[K, V any] struct {
 
 	// drained closes once the background events reader has exited.
 	drained chan struct{}
+
+	// closeOnce guards against re-entering the underlying client's
+	// flush/close on a second Close call; closeErr caches the result
+	// of the first call so every caller sees the same outcome.
+	closeOnce sync.Once
+	closeErr  error
 
 	keySer   kafka.Serializer[K]
 	valueSer kafka.Serializer[V]
@@ -241,7 +248,17 @@ func statusFor(err error) messaging.DeliveryStatus {
 // to the configured FlushTimeout (or ctx's deadline, whichever is
 // sooner); any residual un-acknowledged messages are logged and
 // counted rather than silently dropped.
+//
+// Close is idempotent: a second call (concurrent or sequential) never
+// re-invokes the underlying client's flush/close — doing so would
+// operate on an already-destroyed handle — and instead returns the
+// first call's result.
 func (p *Producer[K, V]) Close(ctx context.Context) error {
+	p.closeOnce.Do(func() { p.closeErr = p.closeClient(ctx) })
+	return p.closeErr
+}
+
+func (p *Producer[K, V]) closeClient(ctx context.Context) error {
 	timeout := kafka.ClampTimeout(ctx, p.cfg.FlushTimeout)
 
 	remaining := p.client.Flush(int(timeout.Milliseconds()))
