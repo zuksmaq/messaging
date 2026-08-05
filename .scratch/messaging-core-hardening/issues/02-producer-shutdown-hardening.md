@@ -37,7 +37,9 @@ inside `confluent-kafka-go`'s `Flush` (cgo call into a destroyed
 librdkafka handle) — `TestCloseTwiceIsSafeNoOp` reproduces this by
 queuing messages, closing twice, and asserting the
 `messaging.producer.unflushed` counter isn't double-counted (which
-would indicate a re-flush).
+would indicate a re-flush). `TestCloseConcurrentIsSafeNoOp` covers the
+ticket's explicit "concurrent" case the same way, with 10 goroutines
+racing on `Close`, run under `-race`.
 
 `Producer.ReadyCheck`'s already-cancelled-context handling turned out
 to already be correct after ticket 01 — `ClampTimeout` returns 0 for a
@@ -47,6 +49,6 @@ locks this in. `TestCloseWithCancelledContextReturnsPromptly` covers
 the same for `Close`.
 
 Verified with `GOWORK=off go build ./... && GOWORK=off go vet ./...`,
-`GOWORK=off go test ./...` (unit, all green), and
+`GOWORK=off go test -race ./...` (unit, all green, no races), and
 `-tags=integration go test ./producer/... -run TestReadyCheckAgainstRealBroker`
 against a real broker container.

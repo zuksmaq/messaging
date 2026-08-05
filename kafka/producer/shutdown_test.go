@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,60 @@ func TestCloseTwiceIsSafeNoOp(t *testing.T) {
 	}
 	if got := counterValue(t, reader, "messaging.producer.unflushed"); got != queued {
 		t.Errorf("messaging.producer.unflushed = %d after two Close() calls, want %d (second call must not re-flush)", got, queued)
+	}
+}
+
+// TestCloseConcurrentIsSafeNoOp covers concurrent Close calls racing
+// against each other, as opposed to TestCloseTwiceIsSafeNoOp's
+// sequential case. Run with -race, this proves the sync.Once guard
+// serializes access to the underlying client rather than merely
+// happening to avoid a crash sequentially.
+func TestCloseConcurrentIsSafeNoOp(t *testing.T) {
+	t.Parallel()
+
+	const queued = 3
+	const callers = 10
+
+	reader, meter := testMeter()
+	p, err := New[string, []byte](Config{
+		BootstrapServers: "127.0.0.1:1",
+		KeyFormat:        kafka.FormatString,
+		ValueFormat:      kafka.FormatBytes,
+		FlushTimeout:     50 * time.Millisecond,
+	}, kafka.WithMetrics(meter))
+	if err != nil {
+		t.Fatalf("New = %v", err)
+	}
+
+	topic := "unreachable"
+	for range queued {
+		msg := &ckafka.Message{
+			TopicPartition: ckafka.TopicPartition{Topic: &topic, Partition: ckafka.PartitionAny},
+			Value:          []byte("payload"),
+		}
+		if err := p.client.Produce(msg, nil); err != nil {
+			t.Fatalf("enqueuing message: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := range callers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = p.Close(context.Background())
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != errs[0] {
+			t.Errorf("Close() call %d = %v, want the same cached result as call 0 (%v)", i, err, errs[0])
+		}
+	}
+	if got := counterValue(t, reader, "messaging.producer.unflushed"); got != queued {
+		t.Errorf("messaging.producer.unflushed = %d after %d concurrent Close() calls, want %d (only one must actually flush)", got, callers, queued)
 	}
 }
 
