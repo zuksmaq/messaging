@@ -13,13 +13,7 @@ jobs:
         with:
           go-version: "1.26"
 
-      - name: build and test (workspace off, per-module)
-        run: |
-          for m in . kafka outbox inbox integration; do
-            (cd "$m" && GOWORK=off go build ./... && GOWORK=off go test ./...)
-          done
-
-      - name: build and test (workspace on)
+      - name: build and test
         run: |
           go build ./...
           go test ./...
@@ -35,7 +29,4 @@ jobs:
       # Tagged tests stand up real brokers/databases via testcontainers,
       # so they run in their own job rather than slowing every push.
       - name: integration tests
-        run: |
-          for m in kafka outbox inbox integration; do
-            (cd "$m" && go test -tags integration -timeout 20m ./...)
-          done
+        run: go test -tags integration -timeout 20m ./...

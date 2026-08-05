@@ -4,15 +4,22 @@ Kafka messaging plus transactional outbox and inbox (idempotent-consumer)
 patterns for Go services. See `docs/adr/` for the individual decisions
 and their rationale.
 
-## Modules
+## Packages
 
-| Module | Path | Depends on |
+One Go module, `github.com/zuksmaq/messaging`, versioned by a single
+tag (ADR 0009).
+
+| Package | Import path | Depends on |
 |---|---|---|
-| root | `github.com/zuksmaq/messaging` | — |
+| root | `github.com/zuksmaq/messaging` | stdlib only |
 | kafka | `github.com/zuksmaq/messaging/kafka` | root |
 | outbox | `github.com/zuksmaq/messaging/outbox` | root |
 | inbox | `github.com/zuksmaq/messaging/inbox` | root |
 | integration | `github.com/zuksmaq/messaging/integration` | all four |
+
+The root package keeps its stdlib-only import list: `kafka`, `outbox`,
+and `inbox` depend on it and never on each other, so the contracts stay
+free of any broker or driver types.
 
 `outbox/postgres` and `outbox/sqlserver` (and the `inbox` equivalents)
 hold dialect-specific SQL, plus the occasional bit of driver-specific

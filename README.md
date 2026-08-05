@@ -1,25 +1,30 @@
 # messaging
 
 Kafka messaging plus transactional outbox and inbox (idempotent-consumer)
-patterns, structured as multiple Go modules in one repository.
+patterns, as a single Go module.
 
-## Modules
+```bash
+go get github.com/zuksmaq/messaging
+```
 
-| Module | Path | Depends on |
+## Packages
+
+| Package | Import path | Holds |
 |---|---|---|
-| root | `github.com/zuksmaq/messaging` | — |
-| kafka | `github.com/zuksmaq/messaging/kafka` | root |
-| outbox | `github.com/zuksmaq/messaging/outbox` | root |
-| inbox | `github.com/zuksmaq/messaging/inbox` | root |
-| integration | `github.com/zuksmaq/messaging/integration` | all four |
+| root | `github.com/zuksmaq/messaging` | broker-agnostic contracts and sentinel errors; no third-party imports |
+| kafka | `github.com/zuksmaq/messaging/kafka` | wire formats and connection settings both sides share |
+| kafka/producer | `…/kafka/producer` | `Config` + `New` for publishing |
+| kafka/consumer | `…/kafka/consumer` | `Config` + `New`, plus the hosted `Runner` loop |
+| outbox | `github.com/zuksmaq/messaging/outbox` | transactional outbox and its relay |
+| inbox | `github.com/zuksmaq/messaging/inbox` | idempotent-consumer inbox |
+| integration | `github.com/zuksmaq/messaging/integration` | end-to-end tests only, no library code |
 
-The kafka module is split into packages: `kafka` holds the wire formats
-and connection settings both sides share, `kafka/producer` and
-`kafka/consumer` each own a `Config` and a `New` constructor (ADR 0008).
+`outbox`/`inbox` stay database-agnostic; the dialect-specific SQL lives
+in their `postgres` and `sqlserver` sub-packages (ADR 0005). The kafka
+split into `producer`/`consumer` is ADR 0008.
 
-The integration module ships no library code: it exists so the
-end-to-end test of outbox → Kafka → Runner → inbox can depend on every
-module at once without any of them depending on the others.
+The whole repo versions as one module, so there is a single tag per
+release and no cross-package version skew (ADR 0009).
 
 See `messaging-handoff.md` for the full design record: decisions,
 invariants, open items, and rejected alternatives.
@@ -27,8 +32,9 @@ invariants, open items, and rejected alternatives.
 ## Development
 
 ```bash
-go work use .   # workspace already committed as go.work
-```
+go build ./...
+go test ./...
 
-CI builds each module with `GOWORK=off` to catch un-tagged local-only
-changes before release.
+# Tests that stand up real brokers/databases via testcontainers:
+go test -tags integration -timeout 20m ./...
+```
