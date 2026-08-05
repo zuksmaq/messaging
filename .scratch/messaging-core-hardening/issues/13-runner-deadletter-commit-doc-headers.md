@@ -13,7 +13,7 @@ preserved rather than silently overwritten.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] `PoisonMessageAction`'s documentation (doc comment and/or
       `CONTEXT.md`) states the DeadLetter/commit duplication
@@ -26,3 +26,8 @@ preserved rather than silently overwritten.
 - [x] A test dead-letters a message twice (simulating a DLQ replay)
       and asserts both passes' dead-letter information is present
       afterward.
+
+## Comments
+
+Landed in #26. The status field and checklist were not
+updated when the work merged; this catches the ticket up to the code.
