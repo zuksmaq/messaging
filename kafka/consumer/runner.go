@@ -204,13 +204,27 @@ func (r *Runner[K, V]) Run(ctx context.Context) error {
 }
 
 // callHandler runs the Handler and recovers a panic into an error
-// carrying the recovered value and a stack trace, so a panicking
-// Handler is routed through the same PoisonMessageAction handling as
-// one that returns an error, instead of crashing the process.
+// carrying the recovered value, so a panicking Handler is routed
+// through the same PoisonMessageAction handling as one that returns an
+// error, instead of crashing the process. The stack trace goes to the
+// log only — it's diagnostic noise the caller's Handler never intended
+// to publish, and doesn't belong riding along in a dead-letter header.
+// A panic value that is itself an error is wrapped with %w so callers
+// can still errors.Is/As through it.
 func (r *Runner[K, V]) callHandler(ctx context.Context, msg messaging.ReceivedMessage[K, V]) (err error) {
 	defer func() {
-		if rec := recover(); rec != nil {
-			err = fmt.Errorf("handler panicked: %v\n%s", rec, debug.Stack())
+		rec := recover()
+		if rec == nil {
+			return
+		}
+		r.logger.ErrorContext(ctx, "handler panicked",
+			slog.Any("panic", rec),
+			slog.String("stack", string(debug.Stack())))
+
+		if recErr, ok := rec.(error); ok {
+			err = fmt.Errorf("handler panicked: %w", recErr)
+		} else {
+			err = fmt.Errorf("handler panicked: %v", rec)
 		}
 	}()
 	return r.handler(ctx, msg)

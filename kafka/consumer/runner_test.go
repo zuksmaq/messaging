@@ -374,6 +374,24 @@ func TestRunHandlerPanic(t *testing.T) {
 		}
 		assertPoisonReported(t, logs, reader, Halt)
 	})
+
+	t.Run("panic value is an error, preserved through errors.Is", func(t *testing.T) {
+		t.Parallel()
+
+		wantErr := errors.New("panicked with a sentinel")
+		c := &fakeConsumer{script: []consumeResult{{msg: received(1)}, {msg: received(2)}}}
+
+		err := run(t, c, func(_ context.Context, msg messaging.ReceivedMessage[string, string]) error {
+			if msg.Offset == 1 {
+				panic(wantErr)
+			}
+			return nil
+		}, RunnerConfig{})
+
+		if !errors.Is(err, wantErr) {
+			t.Errorf("Run error = %v, want it to wrap the panicked error %v", err, wantErr)
+		}
+	})
 }
 
 func TestRunReturnsBrokerAndCommitErrors(t *testing.T) {

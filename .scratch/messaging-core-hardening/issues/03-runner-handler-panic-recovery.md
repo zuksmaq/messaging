@@ -32,14 +32,24 @@ that returns an error, under whichever policy the caller configured.
 
 `Runner.Run` now calls the handler through a new `callHandler` method
 that defers a `recover()`, converting a panic into an error carrying
-the recovered value and a `runtime/debug.Stack()` trace
-(`kafka/consumer/runner.go`). That error flows into the exact same
-`if err := ...; err != nil { poison(...) }` branch a returned handler
-error already used — no separate panic-handling path, so Skip/
-DeadLetter/Halt behave identically to the existing error case by
-construction rather than by parallel implementation.
+the recovered value (`kafka/consumer/runner.go`). That error flows
+into the exact same `if err := ...; err != nil { poison(...) }` branch
+a returned handler error already used — no separate panic-handling
+path, so Skip/DeadLetter/Halt behave identically to the existing error
+case by construction rather than by parallel implementation.
 
-Confirmed the crash was real before the fix: the new
+Code review flagged two refinements, both applied:
+- The full `runtime/debug.Stack()` trace is logged immediately at
+  panic-recovery time (`slog` `ErrorContext`) rather than folded into
+  the error string — a multi-KB stack trace has no business riding
+  inside a dead-letter header or a poison-message warning log.
+- A panic value that is itself an `error` is wrapped with `%w` instead
+  of `%v`, so `errors.Is`/`errors.As` still work through a panicked
+  sentinel error (per ADR 0004). New subtest
+  `TestRunHandlerPanic/panic_value_is_an_error,_preserved_through_errors.Is`
+  locks this in.
+
+Confirmed the crash was real before the fix: the
 `TestRunHandlerPanic/skip` subtest reliably crashed the test process
 with an unrecovered panic prior to the `callHandler` change.
 `TestRunHandlerPanic` covers all three `PoisonMessageAction` values,
