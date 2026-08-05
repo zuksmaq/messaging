@@ -29,6 +29,10 @@ type Row struct {
 	Key     []byte
 	Value   []byte
 	Headers map[string][]byte
+
+	// Attempts is how many times a publish of this row has failed so
+	// far. The Relay uses it to decide when to quarantine the row.
+	Attempts int
 }
 
 // Dialect supplies the SQL that differs per database. The core package
@@ -41,12 +45,21 @@ type Dialect interface {
 
 	// ClaimSQL selects up to its one parameter's worth of rows in id
 	// order, under a row lock that skips rows another relay already
-	// holds. It returns the id, topic, key, value and JSON-encoded
-	// headers columns, in that order.
+	// holds, excluding rows already quarantined. It returns the id,
+	// topic, key, value, JSON-encoded headers and attempts columns, in
+	// that order.
 	ClaimSQL() string
 
 	// DeleteSQL deletes the row whose id is its one parameter.
 	DeleteSQL() string
+
+	// IncrementAttemptsSQL records a failed publish attempt against the
+	// row whose id is its one parameter.
+	IncrementAttemptsSQL() string
+
+	// QuarantineSQL marks the row whose id is its one parameter as
+	// quarantined, excluding it from future ClaimSQL results.
+	QuarantineSQL() string
 }
 
 // Outbox stages events for a single dialect.

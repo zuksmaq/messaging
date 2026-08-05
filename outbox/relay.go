@@ -17,6 +17,7 @@ import (
 const (
 	defaultBatchSize    = 100
 	defaultPollInterval = time.Second
+	defaultMaxAttempts  = 5
 )
 
 // RelayConfig configures the polling relay. DB, Dialect and Producer are
@@ -40,6 +41,11 @@ type RelayConfig struct {
 	// PollInterval is how long Run waits after a poll that did not fill
 	// a batch. Defaults to one second.
 	PollInterval time.Duration
+
+	// MaxAttempts is how many publish failures a row tolerates before
+	// it is quarantined: excluded from future claims so it stops
+	// blocking rows staged after it. Defaults to 5.
+	MaxAttempts int
 }
 
 // Validate reports whether the config is usable. NewRelay calls it and
@@ -60,6 +66,9 @@ func (c RelayConfig) Validate() error {
 	if c.PollInterval < 0 {
 		return fmt.Errorf("%w: poll interval %s is negative", messaging.ErrInvalidConfig, c.PollInterval)
 	}
+	if c.MaxAttempts < 0 {
+		return fmt.Errorf("%w: max attempts %d is negative", messaging.ErrInvalidConfig, c.MaxAttempts)
+	}
 	return nil
 }
 
@@ -72,13 +81,18 @@ func (c RelayConfig) withDefaults() RelayConfig {
 	if c.PollInterval == 0 {
 		c.PollInterval = defaultPollInterval
 	}
+	if c.MaxAttempts == 0 {
+		c.MaxAttempts = defaultMaxAttempts
+	}
 	return c
 }
 
 // Relay polls the outbox table and publishes staged rows at-least-once:
 // it claims a batch under the dialect's row lock, publishes each row in
 // id order, and deletes only those the producer confirmed
-// messaging.Persisted.
+// messaging.Persisted. A row whose publish fails repeatedly is
+// quarantined after MaxAttempts, so it stops blocking the rows staged
+// after it.
 //
 // It is exposed as a blocking Run(ctx) error rather than a
 // framework-managed service type; the caller starts it with
@@ -87,8 +101,9 @@ type Relay struct {
 	cfg    RelayConfig
 	logger *slog.Logger
 
-	published metric.Int64Counter
-	failed    metric.Int64Counter
+	published   metric.Int64Counter
+	failed      metric.Int64Counter
+	quarantined metric.Int64Counter
 }
 
 // NewRelay builds a Relay from cfg. It returns an error wrapping
@@ -118,6 +133,10 @@ func (r *Relay) initMetrics(m metric.Meter) error {
 	if r.failed, err = m.Int64Counter("messaging.outbox.publish_failures",
 		metric.WithDescription("outbox rows left staged because the publish was not confirmed")); err != nil {
 		return fmt.Errorf("creating publish failure counter: %w", err)
+	}
+	if r.quarantined, err = m.Int64Counter("messaging.outbox.quarantined",
+		metric.WithDescription("outbox rows quarantined after repeated publish failures")); err != nil {
+		return fmt.Errorf("creating quarantined counter: %w", err)
 	}
 	return nil
 }
@@ -162,10 +181,11 @@ func (r *Relay) Run(ctx context.Context) error {
 // publishBatch claims one batch and publishes it, returning how many
 // rows were confirmed and deleted.
 //
-// The claim, the publishes and the deletes share one transaction: the
-// row locks the dialect took are held until the deletes commit, so a
-// second relay never sees the rows this one is working on. Rolling back
-// on the way out releases the locks and leaves unconfirmed rows staged.
+// The claim, the publishes, the deletes and any attempt/quarantine
+// bookkeeping share one transaction: the row locks the dialect took are
+// held until it commits, so a second relay never sees the rows this one
+// is working on. Rolling back on the way out releases the locks and
+// leaves unconfirmed rows staged.
 func (r *Relay) publishBatch(ctx context.Context) (int, error) {
 	tx, err := r.cfg.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -184,33 +204,80 @@ func (r *Relay) publishBatch(ctx context.Context) (int, error) {
 	}
 
 	published := 0
+	progressed := false
 	for _, row := range rows {
-		if err := r.publish(ctx, tx, row); err != nil {
-			// Stop at the first unconfirmed row: publishing past it
-			// would reorder events for its key. It and everything after
-			// it stay staged for the next poll.
-			r.failed.Add(ctx, 1, metric.WithAttributes(attribute.String("topic", row.Topic)))
-			r.logger.WarnContext(ctx, "outbox row left staged",
-				slog.Int64("id", row.ID),
-				slog.String("topic", row.Topic),
-				slog.Int("remaining_in_batch", len(rows)-published),
-				slog.String("error", err.Error()),
-			)
-			break
+		publishErr := r.publish(ctx, tx, row)
+		if publishErr == nil {
+			published++
+			progressed = true
+			continue
 		}
-		published++
+
+		quarantined, err := r.recordFailure(ctx, tx, row)
+		if err != nil {
+			return 0, err
+		}
+		progressed = true
+		if quarantined {
+			// A row that has exhausted its attempts no longer blocks
+			// the rows staged after it: it is excluded from future
+			// claims, so publishing past it here cannot reorder
+			// anything it would still be claimed alongside.
+			continue
+		}
+		// Stop at the first row that hasn't yet exhausted its
+		// attempts: publishing past it would reorder events for its
+		// key. It and everything after it stay staged for the next
+		// poll.
+		r.logger.WarnContext(ctx, "outbox row left staged",
+			slog.Int64("id", row.ID),
+			slog.String("topic", row.Topic),
+			slog.Int("remaining_in_batch", len(rows)-published),
+			slog.String("error", publishErr.Error()),
+		)
+		break
 	}
 
-	if published == 0 {
+	if !progressed {
 		return 0, nil
 	}
 	if err := tx.Commit(); err != nil {
 		// The rows were published but not deleted, so the next poll
 		// republishes them: at-least-once, as documented.
-		return 0, fmt.Errorf("committing %d outbox deletes: %w", published, err)
+		return 0, fmt.Errorf("committing outbox batch: %w", err)
 	}
-	r.published.Add(ctx, int64(published))
+	if published > 0 {
+		r.published.Add(ctx, int64(published))
+	}
 	return published, nil
+}
+
+// recordFailure counts and logs a publish failure against row, then
+// either records another attempt or quarantines the row once it has
+// exhausted MaxAttempts. Quarantining is never silent: it is logged and
+// counted like every other poison outcome in this codebase.
+func (r *Relay) recordFailure(ctx context.Context, tx *sql.Tx, row Row) (bool, error) {
+	attrs := metric.WithAttributes(attribute.String("topic", row.Topic))
+	r.failed.Add(ctx, 1, attrs)
+
+	attempts := row.Attempts + 1
+	if attempts < r.cfg.MaxAttempts {
+		if _, err := tx.ExecContext(ctx, r.cfg.Dialect.IncrementAttemptsSQL(), row.ID); err != nil {
+			return false, fmt.Errorf("recording outbox row %d failure: %w", row.ID, err)
+		}
+		return false, nil
+	}
+
+	if _, err := tx.ExecContext(ctx, r.cfg.Dialect.QuarantineSQL(), row.ID); err != nil {
+		return false, fmt.Errorf("quarantining outbox row %d: %w", row.ID, err)
+	}
+	r.quarantined.Add(ctx, 1, attrs)
+	r.logger.WarnContext(ctx, "outbox row quarantined",
+		slog.Int64("id", row.ID),
+		slog.String("topic", row.Topic),
+		slog.Int("attempts", attempts),
+	)
+	return true, nil
 }
 
 // claim reads a locked batch in id order. The rows are fully read before
@@ -229,7 +296,7 @@ func (r *Relay) claim(ctx context.Context, tx *sql.Tx) ([]Row, error) {
 			row     Row
 			headers []byte
 		)
-		if err := result.Scan(&row.ID, &row.Topic, &row.Key, &row.Value, &headers); err != nil {
+		if err := result.Scan(&row.ID, &row.Topic, &row.Key, &row.Value, &headers, &row.Attempts); err != nil {
 			return nil, fmt.Errorf("scanning outbox row: %w", err)
 		}
 		if row.Headers, err = decodeHeaders(headers); err != nil {
