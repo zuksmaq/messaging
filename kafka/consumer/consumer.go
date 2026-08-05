@@ -115,7 +115,7 @@ func (c *Consumer[K, V]) initMetrics(m metric.Meter) error {
 		return fmt.Errorf("creating consumed counter: %w", err)
 	}
 	if c.failed, err = m.Int64Counter("messaging.consumer.failed",
-		metric.WithDescription("messages that could not be deserialized")); err != nil {
+		metric.WithDescription("messages that could not be deserialized or carried a broker error")); err != nil {
 		return fmt.Errorf("creating failed counter: %w", err)
 	}
 	return nil
@@ -124,11 +124,12 @@ func (c *Consumer[K, V]) initMetrics(m metric.Meter) error {
 // Consume blocks until the next message on a subscribed topic is
 // available, ctx is done, or the client fails fatally.
 //
-// A message whose key or value cannot be deserialized is returned with a
-// non-nil error wrapping messaging.ErrDeserialization; the returned
-// ReceivedMessage still carries the topic, partition and offset plus the
-// undecoded RawKey/RawValue, so a caller applying a poison-message
-// policy can commit past it or dead-letter the original bytes.
+// A message whose key or value cannot be deserialized, or that carries a
+// partition/fetch-level broker error, is returned with a non-nil error
+// wrapping messaging.ErrDeserialization; the returned ReceivedMessage
+// still carries the topic, partition and offset plus the undecoded
+// RawKey/RawValue, so a caller applying a poison-message policy can
+// commit past it or dead-letter the original bytes.
 func (c *Consumer[K, V]) Consume(ctx context.Context) (messaging.ReceivedMessage[K, V], error) {
 	var zero messaging.ReceivedMessage[K, V]
 	for {
@@ -171,7 +172,9 @@ func (c *Consumer[K, V]) poll() (ckafka.Event, error) {
 
 // decode turns a broker message into a ReceivedMessage. A nil key or
 // value is left as the zero K/V without invoking the deserializer: a nil
-// value is a tombstone, not a malformed encoding.
+// value is a tombstone, not a malformed encoding. A record carrying a
+// partition/fetch-level broker error is never deserialized: its bytes
+// are not real message data.
 func (c *Consumer[K, V]) decode(ctx context.Context, m *ckafka.Message) (messaging.ReceivedMessage[K, V], error) {
 	topic := *m.TopicPartition.Topic
 	attrs := metric.WithAttributes(attribute.String("topic", topic))
@@ -184,7 +187,13 @@ func (c *Consumer[K, V]) decode(ctx context.Context, m *ckafka.Message) (messagi
 		Offset:    int64(m.TopicPartition.Offset),
 		Timestamp: m.Timestamp,
 	}
-	out.Headers = fromHeaders(m.Headers)
+	out.Headers, out.HeaderList = fromHeaders(m.Headers)
+
+	if m.TopicPartition.Error != nil {
+		c.failed.Add(ctx, 1, attrs)
+		return out, fmt.Errorf("%w: %w: partition error reading %s[%d]@%d: %v",
+			messaging.ErrDeserialization, messaging.ErrBroker, topic, out.Partition, out.Offset, m.TopicPartition.Error)
+	}
 
 	if m.Key != nil {
 		key, err := c.keyDe.Deserialize(topic, m.Key)
@@ -285,13 +294,15 @@ func joinCloseErrors(clientErr, registryErr error) error {
 	return errors.Join(clientErr, registryErr)
 }
 
-func fromHeaders(h []ckafka.Header) map[string][]byte {
+func fromHeaders(h []ckafka.Header) (map[string][]byte, []messaging.Header) {
 	if len(h) == 0 {
-		return nil
+		return nil, nil
 	}
-	out := make(map[string][]byte, len(h))
-	for _, hdr := range h {
-		out[hdr.Key] = hdr.Value
+	m := make(map[string][]byte, len(h))
+	list := make([]messaging.Header, len(h))
+	for i, hdr := range h {
+		m[hdr.Key] = hdr.Value
+		list[i] = messaging.Header{Key: hdr.Key, Value: hdr.Value}
 	}
-	return out
+	return m, list
 }
